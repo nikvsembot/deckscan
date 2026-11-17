@@ -43,11 +43,6 @@ const CM_EXPANSIONS = {
 // Known-good pairs used as a self-check of the version matching.
 const CHECKS = [{ card: 'v-streetkid', set: 'welcometonightcitybeta', no: 'β005b', idProduct: 905093 }];
 
-const RARITY_TIER = {
-  Common: 0, Uncommon: 1, Rare: 2, Epic: 3, 'Nova Rare': 4,
-  Secret: 5, 'Iconic Other': 5, 'Iconic Legend': 5, 'Iconic Secret': 6,
-};
-
 const norm = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '');
 const log = (...a) => console.log('[data]', ...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -178,20 +173,10 @@ async function loadCardmarket(cards, printings) {
     const qs = [...Q].sort((a, b) => a.idProduct - b.idProduct);
     if (qs.length === 1) { for (const p of pr) assign.set(p.id, qs[0].idProduct); continue; }
     if (qs.length !== pr.length) mismatches.push({ key: k, printings: pr.map(p => p.no), products: qs.map(q => q.idProduct) });
-    const tiers = [...new Set(pr.map(p => RARITY_TIER[p.r] ?? 2))].sort((a, b) => a - b);
-    if (tiers.length === 1 || qs.length !== pr.length) {
-      pr.forEach((p, i) => { if (qs[Math.min(i, qs.length - 1)]) assign.set(p.id, qs[Math.min(i, qs.length - 1)].idProduct); });
-      continue;
-    }
-    // Several rarity tiers: cheapest products go to the lowest tier, then by product id / collector number.
-    const byPrice = [...qs].sort((a, b) => (trendOf(priceById.get(a.idProduct)) ?? 1e9) - (trendOf(priceById.get(b.idProduct)) ?? 1e9) || a.idProduct - b.idProduct);
-    let at = 0;
-    for (const t of tiers) {
-      const tp = pr.filter(p => (RARITY_TIER[p.r] ?? 2) === t);
-      const chunk = byPrice.slice(at, at + tp.length).sort((a, b) => a.idProduct - b.idProduct);
-      at += tp.length;
-      tp.forEach((p, i) => assign.set(p.id, chunk[i].idProduct));
-    }
+    // Cardmarket adds a card's versions in collector-number order, so product ids ascend with collector numbers
+    // (verified: V — Streetkid β005a/β005b/β144 = 905092/905093/905232). Prices can't be used to order them:
+    // brand-new versions often have no trend yet.
+    pr.forEach((p, i) => { const q = qs[Math.min(i, qs.length - 1)]; if (q) assign.set(p.id, q.idProduct); });
   }
 
   // diagnostics for checking how Cardmarket orders versions of one card
@@ -205,7 +190,7 @@ async function loadCardmarket(cards, printings) {
       printings: [...P].sort((a, b) => collectorKey(a.no) - collectorKey(b.no)).map(p => [p.no, p.r, assign.get(p.id) || null]),
       products: [...Q].sort((a, b) => a.idProduct - b.idProduct).map(q => [q.idProduct, q.dateAdded, trendOf(priceById.get(q.idProduct)), q.idMetacard]) });
   }
-  const r2 = x => (x == null || Number.isNaN(x) ? null : Math.round(x * 100) / 100);
+  const r2 = x => (x == null || Number.isNaN(x) || x <= 0 ? null : Math.round(x * 100) / 100); // 0 = no price yet
   const out = {};
   for (const p of printings) {
     const id = assign.get(p.id);

@@ -67,11 +67,19 @@ export function setShort(code) {
 }
 export const isFoilOnly = pr => pr && /Iconic|Secret|Nova/.test(pr.r);
 
-/** Cardmarket trend price in EUR (null if unknown). */
+/**
+ * Cardmarket value in EUR (null if Cardmarket has no price yet).
+ * Price trend first; foil-only versions (Epic/Iconic/Secret/Nova) only have a foil trend;
+ * brand-new versions may only have a lowest listing.
+ * p = [idProduct, trend, low, avg30, trendFoil, lowFoil, avg30Foil]
+ */
 export function price(pid, foil = false) {
   const p = db.prices.p[pid];
   if (!p) return null;
-  return foil ? (p[4] ?? p[1] ?? null) : (p[1] ?? p[4] ?? p[2] ?? null);
+  const v = x => (x > 0 ? x : null);
+  return foil
+    ? (v(p[4]) ?? v(p[1]) ?? v(p[5]) ?? v(p[2]) ?? null)
+    : (v(p[1]) ?? v(p[4]) ?? v(p[3]) ?? v(p[6]) ?? v(p[2]) ?? v(p[5]) ?? null);
 }
 export const productId = pid => db.prices.p[pid]?.[0] ?? null;
 export function cmLink(pid) {
