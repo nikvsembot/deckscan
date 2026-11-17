@@ -1,0 +1,67 @@
+name: Update prices & deploy app
+
+# Builds fresh card data + Cardmarket prices + scan fingerprints and publishes the app to GitHub Pages.
+# Runs daily, on every push to main, and on demand (Actions tab -> Run workflow).
+on:
+  schedule:
+    - cron: '23 6 * * *'   # daily, after Cardmarket's morning price guide (≈07:23 CET / 15:23 JST)
+  workflow_dispatch:
+    inputs:
+      selftest:
+        description: 'Recognition self-test rounds per card (0 = skip)'
+        default: '2'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci --omit=dev
+
+      - name: Restore card image + fingerprint cache
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: deckscan-cache-${{ github.run_id }}
+          restore-keys: deckscan-cache-
+
+      - name: Build data (cards, Cardmarket prices, scan fingerprints, self-test)
+        env:
+          SELFTEST_ROUNDS: ${{ github.event.inputs.selftest || '2' }}
+        run: node scripts/build-data.mjs
+
+      - name: Show data report
+        run: cat data/meta.json
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp -r index.html manifest.webmanifest sw.js css js lib vendor icons data _site/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4

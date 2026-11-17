@@ -1,0 +1,6 @@
+node_modules/
+.cache/
+data/
+_site/
+test/fixture/
+vendor/_*

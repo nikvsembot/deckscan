@@ -1,0 +1,20 @@
+{
+  "name": "deckscan",
+  "private": true,
+  "type": "module",
+  "description": "Cyberpunk TCG scanner, collection and deck builder with Cardmarket prices",
+  "scripts": {
+    "data": "node scripts/build-data.mjs",
+    "vendor": "node scripts/vendor.mjs",
+    "serve": "python3 -m http.server 8080"
+  },
+  "dependencies": {
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "firebase": "^10.14.1",
+    "htm": "^3.1.1",
+    "preact": "^10.24.3"
+  }
+}
