@@ -38,7 +38,7 @@ const CM_EXPANSIONS = {
   6718: ['prereleasebeta'], 6765: ['prereleaseretail'],
   6719: ['PRM01'], 6952: ['judgepromos'],
   6953: ['nightcitybrawls1'], 6954: ['nightcityshowdowns1'], 6955: ['edgerunneropens1'],
-  6722: ['arasakademodeck', 'mercdemodeck'],
+  6721: ['arasakademodeck'], 6720: ['mercdemodeck'],   // "Embracing Power / The Heist - Demo Deck" (14 / 15 cards)
 };
 // Known-good pairs used as a self-check of the version matching.
 const CHECKS = [{ card: 'v-streetkid', set: 'welcometonightcitybeta', no: 'β005b', idProduct: 905093 }];
@@ -194,6 +194,17 @@ async function loadCardmarket(cards, printings) {
     }
   }
 
+  // diagnostics for checking how Cardmarket orders versions of one card
+  const expStats = [...prodByExp].map(([exp, prods]) => ({ exp, products: prods.length, sets: expMap.get(exp) || null,
+    matched: prods.filter(q => [...assign.values()].includes(q.idProduct)).length, sample: prods.slice(0, 2).map(q => q.name) }));
+  const versionGroups = [];
+  for (const [k, P] of pGroups) {
+    const Q = qGroups.get(k);
+    if (!Q || (P.length < 2 && Q.length < 2)) continue;
+    versionGroups.push({ key: k,
+      printings: [...P].sort((a, b) => collectorKey(a.no) - collectorKey(b.no)).map(p => [p.no, p.r, assign.get(p.id) || null]),
+      products: [...Q].sort((a, b) => a.idProduct - b.idProduct).map(q => [q.idProduct, q.dateAdded, trendOf(priceById.get(q.idProduct)), q.idMetacard]) });
+  }
   const r2 = x => (x == null || Number.isNaN(x) ? null : Math.round(x * 100) / 100);
   const out = {};
   for (const p of printings) {
@@ -211,7 +222,8 @@ async function loadCardmarket(cards, printings) {
   for (const c of checks) log(`check ${c.card} ${c.no}: expected ${c.idProduct}, got ${c.got} -> ${c.ok ? 'OK' : 'FAIL'}`);
   return {
     prices: { updatedAt: pg.createdAt, fetchedAt: new Date().toISOString(), currency: 'EUR', fields: ['idProduct', 'trend', 'low', 'avg30', 'trendFoil', 'lowFoil', 'avg30Foil'], p: out },
-    report: { checks, autoMapped, unknownExp, mismatches: mismatches.slice(0, 40), unmatchedCount: unmatched.length, unmatched: unmatched.slice(0, 60) },
+    report: { checks, autoMapped, unknownExp, expStats, mismatches: mismatches.slice(0, 40), unmatchedCount: unmatched.length, unmatched: unmatched.slice(0, 60) },
+    debug: { versionGroups },
   };
 }
 
@@ -243,9 +255,9 @@ async function buildFingerprints(printings, imgUrl, needImages) {
       else { png = await refImage(await getBuffer(src.url)); await fs.writeFile(imgFile, png); downloaded++; }
       if (!cached) {
         const { data, w, h } = await rawRGBA(png);
-        const { v } = fingerprint(integral(data, w, h), { x: 0, y: 0, w, h });
+        const { v, contrast } = fingerprint(integral(data, w, h), { x: 0, y: 0, w, h });
         const { q, scale } = quantize(v);
-        cache[p.id] = { k: src.key, q: Buffer.from(q.buffer).toString('base64'), s: scale };
+        cache[p.id] = { k: src.key, q: Buffer.from(q.buffer).toString('base64'), s: scale, c: +contrast.toFixed(1) };
       }
       if (needImages) images.set(p.id, png);
     } catch (e) { failed.push(`${p.id}: ${e.message}`); }
@@ -262,7 +274,9 @@ const SET_PRIORITY = ['welcometonightcityretail', 'welcometonightcitybeta', 'the
   'theheistbetastarterdeck', 'embracingpowerbetastarterdeck', 'boxtoppersretail', 'boxtoppersbeta', 'prereleaseretail', 'prereleasebeta'];
 
 function buildIndex(printings, cache) {
-  const list = printings.filter(p => cache[p.id]);
+  // a near-blank render (placeholder art) would match everything weakly, so leave it out
+  const lowContrast = printings.filter(p => cache[p.id] && cache[p.id].c != null && cache[p.id].c < 12).map(p => `${p.set} ${p.no} ${p.c} (${cache[p.id].c})`);
+  const list = printings.filter(p => cache[p.id] && !(cache[p.id].c != null && cache[p.id].c < 12));
   const N = list.length;
   // raw fingerprints -> catalogue mean -> centred, re-quantised references
   const raw = list.map(p => {
@@ -289,7 +303,7 @@ function buildIndex(printings, cache) {
   }
   const gid = new Map(); const groups = new Int32Array(N);
   for (let i = 0; i < N; i++) { const r = find(i); if (!gid.has(r)) gid.set(r, gid.size); groups[i] = gid.get(r); }
-  return { list, refs, scales, groups, nGroups: gid.size, mean };
+  return { list, refs, scales, groups, nGroups: gid.size, mean, lowContrast };
 }
 
 // ---------- 4. self-test on simulated camera shots ----------
@@ -330,7 +344,7 @@ async function selfTest(index, images, rounds) {
   const { list, refs, scales, groups, mean } = index;
   const m = new Matcher(refs, scales, groups, mean);
   const R = rng(12345);
-  const correctTop = [], margins = [], wrongTop = [], fails = [];
+  const correctTop = [], margins = [], wrongTop = [], otherCard = [], fails = [];
   let n = 0, ok = 0;
   for (let i = 0; i < list.length; i++) {
     const png = images.get(list[i].id);
@@ -340,6 +354,8 @@ async function selfTest(index, images, rounds) {
       const res = m.match(integral(data, w, h), { x: 0, y: 0, w, h }).results;
       n++;
       const top = res[0], second = res[1] || { s: 0 };
+      const firstOther = res.find(r => list[r.i].c !== list[i].c);
+      if (firstOther) otherCard.push(firstOther.s);
       if (top.g === groups[i]) { ok++; correctTop.push(top.s); margins.push(top.s - second.s); wrongTop.push(second.s); }
       else {
         wrongTop.push(top.s);
@@ -350,12 +366,14 @@ async function selfTest(index, images, rounds) {
   }
   const acc = n ? ok / n : null;
   // Accept a match only above almost every wrong best-score, with a clear margin over the runner-up.
-  const accept = Math.max(0.3, Math.min(pct(wrongTop, 0.99) ?? 0.5, (pct(correctTop, 0.1) ?? 0.6) - 0.02));
-  const margin = Math.max(0.02, Math.min(0.08, (pct(margins, 0.15) ?? 0.06)));
+  const accept = Math.max(0.42, Math.min(0.62, (pct(otherCard, 0.995) ?? 0.5) + 0.02));
+  const margin = Math.max(0.03, Math.min(0.06, (pct(margins, 0.1) ?? 0.05) / 3));
   const stats = {
     shots: n, accuracy: acc && +acc.toFixed(4),
     correctTop: { p5: pct(correctTop, 0.05), p50: pct(correctTop, 0.5) },
     wrongTop: { p50: pct(wrongTop, 0.5), p99: pct(wrongTop, 0.99) },
+    otherCard: { p50: pct(otherCard, 0.5), p99: pct(otherCard, 0.99), p995: pct(otherCard, 0.995), max: pct(otherCard, 1) },
+    wouldAdd: { correct: correctTop.filter(s => s >= accept).length, wrongCard: 0 },
     margin: { p15: pct(margins, 0.15), p50: pct(margins, 0.5) },
     thresholds: { accept: +accept.toFixed(3), margin: +margin.toFixed(3), release: +(accept * 0.8).toFixed(3) },
     fails: fails.slice(0, 40),
@@ -386,6 +404,7 @@ async function main() {
   const cardsOut = { updatedAt: new Date().toISOString(), source: 'cyberpunktcg.com card database', sets, setOrder, cards, printings };
   await fs.writeFile(path.join(DATA, 'cards.json'), JSON.stringify(cardsOut));
   if (cm) await fs.writeFile(path.join(DATA, 'prices.json'), JSON.stringify(cm.prices));
+  if (cm) await fs.writeFile(path.join(DATA, 'cm-debug.json'), JSON.stringify(cm.debug, null, 1));
   await fs.writeFile(path.join(DATA, 'fp.bin'), Buffer.from(index.refs.buffer));
   await fs.writeFile(path.join(DATA, 'fp.json'), JSON.stringify({
     dim: DIM, gw: GW, gh: GH, n: index.list.length, groups: index.nGroups,
@@ -396,7 +415,7 @@ async function main() {
   await fs.writeFile(path.join(DATA, 'meta.json'), JSON.stringify({
     builtAt: new Date().toISOString(), seconds: Math.round((Date.now() - t0) / 1000),
     cards: cards.length, printings: printings.length, fingerprints: index.list.length, artGroups: index.nGroups,
-    imageFailures: fp.failed.slice(0, 20), cardmarket: cm ? cm.report : prevMeta.cardmarket || null, selftest: st,
+    imageFailures: fp.failed.slice(0, 20), lowContrastSkipped: index.lowContrast, cardmarket: cm ? cm.report : prevMeta.cardmarket || null, selftest: st,
   }, null, 1));
   log(`done in ${Math.round((Date.now() - t0) / 1000)}s`);
   if (cm && cm.report.checks.some(c => !c.ok)) log('WARNING: a Cardmarket version check failed; see data/meta.json');
