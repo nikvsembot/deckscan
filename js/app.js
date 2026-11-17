@@ -565,7 +565,7 @@ function SettingsView({ installEvt }) {
     </section>
 
     <section><h4>Prices</h4>
-      <p class="small muted">Cardmarket “price trend” in euros, from Cardmarket’s daily price guide (updated ${pricesDate()}). Foil copies use the foil trend when Cardmarket has one.</p>
+      <p class="small muted">Cardmarket “price trend” in euros, from Cardmarket’s daily price guide (updated ${pricesDate()}). Foil-only versions (Epic, Iconic, Secret, Nova) use the foil trend; versions too new to have a trend use the lowest listing. A few promo versions aren’t sold on Cardmarket yet and show “–”.</p>
     </section>
 
     <section><h4>Backup</h4>
