@@ -4,3 +4,4 @@ data/
 _site/
 test/fixture/
 vendor/_*
+test/mtg-fixture/

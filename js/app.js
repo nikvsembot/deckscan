@@ -1,17 +1,20 @@
 import { html, render, useState, useEffect, useMemo, useRef, useCallback } from '../vendor/ui.mjs';
 import {
-  db, loadData, loadMatcher, cardOf, fullName, setName, setShort, price, eur, cmLink, cheapest, pricesDate,
-  preferredMember, imageUrl, CM_SEARCH,
+  db, loadData, loadMatcher, cardOf, fullName, setName, setShort, prLabel, price, eur, cmLink, cheapest, pricesDate,
+  preferredMember, imageUrl, CM_SEARCH, GAMES, hasGame, gameOf,
 } from './data.js';
 import { store } from './store.js';
 import { sync, initSync, signIn, signOutUser } from './sync.js';
 import { Scanner } from './scanner.js';
-import { checkDeck, ownedByCard, deckNeeds } from './decks.js';
+import { checkDeck, ownedByCard, deckNeeds, MTG_FORMATS, copyLimit, deckGame } from './decks.js';
 
 // ---------------------------------------------------------------- helpers
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-const COLORS = { Red: '#ff4655', Blue: '#3d8bff', Green: '#2fd27a', Yellow: '#ffd23f' };
-const TYPES = ['Legend', 'Unit', 'Program', 'Gear'];
+const COLORS = { Red: '#ff4655', Blue: '#3d8bff', Green: '#2fd27a', Yellow: '#ffd23f',
+  White: '#efe6c8', Black: '#a99cc0', Multi: '#d9b44a', Colorless: '#9aa3ad', Land: '#a08b6c' };
+const GAME_COLORS = { cyberpunk: ['Red', 'Blue', 'Green', 'Yellow'], mtg: ['White', 'Blue', 'Black', 'Red', 'Green', 'Multi', 'Colorless'] };
+const GAME_TYPES = { cyberpunk: ['Legend', 'Unit', 'Program', 'Gear'], mtg: ['Creature', 'Instant', 'Sorcery', 'Enchantment', 'Artifact', 'Planeswalker', 'Land'] };
+const TYPES = GAME_TYPES.cyberpunk;
 const cx = (...a) => a.filter(Boolean).join(' ');
 
 function useStore() {
@@ -117,14 +120,24 @@ function Stepper({ value, onChange, min = 0, max = 99, label }) {
 
 const Dot = ({ color }) => html`<i class="dot" style=${{ background: COLORS[color] || '#888' }} title=${color}></i>`;
 
+/** Cyberpunk | Magic switch (only games whose data is built). */
+function GameSwitch({ value, onChange, small }) {
+  const games = Object.keys(GAMES).filter(hasGame);
+  if (games.length < 2) return null;
+  return html`<div class=${cx('seg', small && 'small')} role="tablist">${games.map(g => html`<button role="tab" aria-selected=${value === g} class=${cx(value === g && 'on')} onClick=${() => onChange(g)}>${GAMES[g].name}</button>`)}</div>`;
+}
+const useGame = s => (hasGame(s.settings.game) ? s.settings.game : 'cyberpunk');
+const setGame = g => store.set({ game: g });
+
 // ---------------------------------------------------------------- card search (manual add, deck builder)
-function filterCards({ q = '', colors = [], types = [] }) {
+function filterCards({ q = '', colors = [], types = [], game = null }) {
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);
   return db.cards.filter(c => {
+    if (game && c.game !== game) return false;
     if (colors.length && !colors.includes(c.c)) return false;
     if (types.length && !types.includes(c.t)) return false;
     if (!words.length) return true;
-    const hay = `${c.n} ${c.s} ${c.tags.join(' ')} ${c.t}`.toLowerCase();
+    const hay = `${c.n} ${c.s} ${c.tags.join(' ')} ${c.t} ${c.tl || ''}`.toLowerCase();
     return words.every(w => hay.includes(w));
   });
 }
@@ -145,8 +158,10 @@ function CardSheet({ cardId, focus, onClose }) {
     <div class="card-detail">
       <${Thumb} pid=${sel} big />
       <div class="meta">
-        <div><${Dot} color=${c.c} /> ${c.c} ${c.t}</div>
-        <div class="muted">${[c.cost != null && `Cost ${c.cost}`, c.pw != null && `Power ${c.pw}`, c.ram != null && `RAM ${c.ram}`].filter(Boolean).join(' · ')}</div>
+        <div><${Dot} color=${c.c} /> ${c.game === 'mtg' ? c.tl : `${c.c} ${c.t}`}</div>
+        <div class="muted">${c.game === 'mtg'
+          ? [c.mc && `Mana ${c.mc.replace(/[{}]/g, '')}`, c.pw != null && `${c.pw}/${c.tough}`].filter(Boolean).join(' · ')
+          : [c.cost != null && `Cost ${c.cost}`, c.pw != null && `Power ${c.pw}`, c.ram != null && `RAM ${c.ram}`].filter(Boolean).join(' · ')}</div>
         <div class="muted small">${c.tags.join(' · ')}</div>
         <div class="big-num">${eur(price(sel))}</div>
         <a class="btn small" href=${cmLink(sel)} target="_blank" rel="noopener">Cardmarket <${Icon} name="ext" size="14" /></a>
@@ -157,7 +172,7 @@ function CardSheet({ cardId, focus, onClose }) {
       ${prs.map(p => {
         const e = s.coll[p.id] || {};
         return html`<div class=${cx('pr-row', sel === p.id && 'sel')} onClick=${() => setSel(p.id)}>
-          <div class="grow"><b>${setShort(p.set)}</b> <span class="muted">#${p.no}</span><div class="small muted">${p.r} · ${eur(price(p.id))}${price(p.id, true) !== price(p.id) ? ` · foil ${eur(price(p.id, true))}` : ''}</div></div>
+          <div class="grow"><b>${setShort(p.set)}</b> <span class="muted">#${p.no}${p.v ? ' · ' + p.v : ''}</span><div class="small muted">${p.r} · ${eur(price(p.id))}${price(p.id, true) !== price(p.id) ? ` · foil ${eur(price(p.id, true))}` : ''}</div></div>
           <div class="col-end" onClick=${ev => ev.stopPropagation()}>
             <${Stepper} label="Normal copies" value=${e.n || 0} onChange=${d => store.add(p.id, d, false)} />
             <span class="foil-step"><${Icon} name="star" size="13" /><${Stepper} label="Foil copies" value=${e.f || 0} onChange=${d => store.add(p.id, d, true)} /></span>
@@ -169,10 +184,10 @@ function CardSheet({ cardId, focus, onClose }) {
 }
 
 // ---------------------------------------------------------------- manual add sheet
-function ManualAdd({ onPick, onClose }) {
+function ManualAdd({ onPick, onClose, game }) {
   const [q, setQ] = useState('');
   const [card, setCard] = useState(null);
-  const res = useMemo(() => filterCards({ q }).slice(0, 60), [q]);
+  const res = useMemo(() => filterCards({ q, game }).slice(0, 60), [q]);
   return html`<${Sheet} title=${card ? fullName(card) : 'Add a card by name'} onClose=${onClose}>
     ${!card ? html`
       <input class="input" autofocus placeholder="Card name…" value=${q} onInput=${e => setQ(e.target.value)} />
@@ -180,7 +195,7 @@ function ManualAdd({ onPick, onClose }) {
     : html`
       <p class="muted small">Pick the version you have:</p>
       <div class="list">${(db.prByCard.get(card.id) || []).map(p => html`<button class="list-row" onClick=${() => onPick(p.id)}>
-        <span class="grow"><b>${setShort(p.set)}</b> #${p.no} <span class="muted small">${p.r}</span></span><b>${eur(price(p.id))}</b></button>`)}</div>
+        <span class="grow"><b>${setShort(p.set)}</b> #${p.no}${p.v ? ' · ' + p.v : ''} <span class="muted small">${p.r}</span></span><b>${eur(price(p.id))}</b></button>`)}</div>
       <button class="btn" onClick=${() => setCard(null)}>Back</button>`}
   <//>`;
 }
@@ -198,6 +213,8 @@ function ScanView() {
   const [manual, setManual] = useState(false);
   const [editing, setEditing] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const game = useGame(s);
+  const entryRef = useRef(null); // current game's matcher, thresholds and artwork groups
 
   const session = s.session;
   const total = session.reduce((a, e) => a + (price(e.pid, e.foil) || 0), 0);
@@ -216,15 +233,16 @@ function ScanView() {
   const start = async () => {
     setErr(''); setCam('starting');
     try {
-      const matcher = await loadMatcher();
+      const entry = await loadMatcher(game);
+      entryRef.current = entry;
       const sc = new Scanner({
-        video: videoRef.current, rootEl: () => rootRef.current, guideEl: () => guideRef.current, matcher,
+        video: videoRef.current, rootEl: () => rootRef.current, guideEl: () => guideRef.current, matcher: entry.matcher,
         thresholds: () => {
-          const t = db.thresholds || { accept: 0.5, margin: 0.06, release: 0.4 };
+          const t = entryRef.current?.thresholds || { accept: 0.5, margin: 0.06, release: 0.4 };
           const sens = store.state.settings.sensitivity;
           return { accept: t.accept, margin: Math.max(0.02, t.margin - sens * 0.01), release: t.release, slack: sens * 0.04 };
         },
-        onAdd: top => addPid(preferredMember(db.groupMembers.get(top.g), store.state.settings.preferSet), 'scan'),
+        onAdd: top => addPid(preferredMember(entryRef.current.groupMembers.get(top.g), store.state.settings.preferSet), 'scan'),
         onState: (state, info) => setSt({ state, info }),
       });
       scRef.current = sc;
@@ -244,6 +262,18 @@ function ScanView() {
     return () => { document.removeEventListener('visibilitychange', vis); stop(); };
   }, []);
   useEffect(() => { if (scRef.current) scRef.current.paused = paused; }, [paused]);
+  // switching game while the camera runs: swap in that game's matcher
+  useEffect(() => {
+    if (!scRef.current) return;
+    let alive = true;
+    loadMatcher(game).then(entry => {
+      if (!alive || !scRef.current) return;
+      entryRef.current = entry;
+      scRef.current.o.matcher = entry.matcher;
+      scRef.current.reset();
+    }).catch(e => toast(e.message));
+    return () => { alive = false; };
+  }, [game]);
 
   const undo = e => { store.add(e.pid, -1, e.foil); store.sessionRemove(e.id); };
   const switchTo = (e, pid) => { if (pid === e.pid) return; store.add(e.pid, -1, e.foil); store.add(pid, 1, e.foil); store.sessionUpdate(e.id, { pid }); };
@@ -252,17 +282,19 @@ function ScanView() {
   const lastCard = last && cardOf(last.pid);
   const versions = last ? db.prByCard.get(lastCard?.id) || [] : [];
   const dbg = s.settings.debug && st.info;
-  const collTotal = useMemo(() => Object.entries(s.coll).reduce((a, [pid, e]) => a + (e.n || 0) * (price(pid) || 0) + (e.f || 0) * (price(pid, true) || 0), 0), [s.coll]);
+  const collTotal = useMemo(() => Object.entries(s.coll).filter(([pid]) => gameOf(pid) === game)
+    .reduce((a, [pid, e]) => a + (e.n || 0) * (price(pid) || 0) + (e.f || 0) * (price(pid, true) || 0), 0), [s.coll, game]);
 
   return html`<div class="scan">
     <div class="hud">
       <div><div class="label">This session</div><div class="total">${eur(total)}</div><div class="small muted">${session.length} card${session.length === 1 ? '' : 's'}</div></div>
-      <div class="right"><div class="label">Collection</div><div class="sub-total">${eur(collTotal)}</div>
+      <div class="right"><div class="label">${GAMES[game].name} collection</div><div class="sub-total">${eur(collTotal)}</div>
         ${session.length > 0 && html`<button class="link small" onClick=${() => setConfirmClear(true)}>New session</button>`}</div>
     </div>
 
     <div class="cam" ref=${rootRef}>
       <video ref=${videoRef} playsinline muted></video>
+      <div class="cam-game"><${GameSwitch} value=${game} onChange=${setGame} small /></div>
       <div ref=${guideRef} class=${cx('guide', `st-${st.state}`, cam !== 'on' && 'dim')}>
         ${flash > 0 && html`<i class="flash" key=${'f' + flash}></i>`}
         <i class="c tl"></i><i class="c tr"></i><i class="c bl"></i><i class="c br"></i>
@@ -279,7 +311,7 @@ function ScanView() {
         <button class="round" aria-label=${paused ? 'Resume' : 'Pause'} onClick=${() => setPaused(!paused)}><${Icon} name=${paused ? 'play' : 'pause'} /></button>
         <button class="round" aria-label="Stop camera" onClick=${stop}><${Icon} name="x" /></button>
       </div>`}
-      ${dbg && html`<div class="debug">${(st.info.results || []).map(r => html`<div>${fullName(cardOf(db.fpIds[r.i]))} <b>${r.s.toFixed(3)}</b></div>`)}
+      ${dbg && html`<div class="debug">${(st.info.results || []).map(r => html`<div>${fullName(cardOf(entryRef.current?.fpIds[r.i]))} <b>${r.s.toFixed(3)}</b></div>`)}
         <div>contrast ${st.info.contrast.toFixed(0)} · margin ${st.info.margin.toFixed(3)} ${st.info.moving ? '· moving' : ''} · ${st.state}</div></div>`}
     </div>
 
@@ -289,12 +321,12 @@ function ScanView() {
           <div onClick=${() => setEditing(lastCard.id)}><${Thumb} pid=${last.pid} /></div>
           <div class="grow" onClick=${() => setEditing(lastCard.id)}>
             <div class="name">${fullName(lastCard)}</div>
-            <div class="small muted">${setShort(db.prById.get(last.pid).set)} #${db.prById.get(last.pid).no} · ${db.prById.get(last.pid).r}</div>
+            <div class="small muted">${prLabel(db.prById.get(last.pid))} · ${db.prById.get(last.pid).r}</div>
           </div>
           <div class="price">${eur(price(last.pid, last.foil))}</div>
         </div>
         <div class="row gap wrap">
-          ${versions.length > 1 && versions.slice(0, 8).map(p => html`<button class=${cx('chip', p.id === last.pid && 'on')} onClick=${() => switchTo(last, p.id)}>${setShort(p.set)} ${p.no} · ${eur(price(p.id, last.foil))}</button>`)}
+          ${versions.length > 1 && versions.slice(0, 8).map(p => html`<button class=${cx('chip', p.id === last.pid && 'on')} onClick=${() => switchTo(last, p.id)}>${setShort(p.set)} ${p.no}${p.v ? ' ' + p.v : ''} · ${eur(price(p.id, last.foil))}</button>`)}
         </div>
         <div class="row gap">
           <button class=${cx('chip', last.foil && 'on')} onClick=${() => toggleFoil(last)}><${Icon} name="star" size="14" /> Foil</button>
@@ -307,11 +339,11 @@ function ScanView() {
       </div>
       ${session.length > 1 && html`<div class="session-list">${session.slice(1, 40).map(e => {
         const c = cardOf(e.pid), p = db.prById.get(e.pid);
-        return html`<div class="s-row"><span class="grow" onClick=${() => setEditing(c.id)}>${fullName(c)} <span class="muted small">${setShort(p.set)} #${p.no}${e.foil ? ' ★' : ''}</span></span>
+        return html`<div class="s-row"><span class="grow" onClick=${() => setEditing(c.id)}>${fullName(c)} <span class="muted small">${prLabel(p)}${e.foil ? ' ★' : ''}</span></span>
           <b>${eur(price(e.pid, e.foil))}</b><button class="icon-btn" aria-label="Remove" onClick=${() => undo(e)}><${Icon} name="x" size="16" /></button></div>`;
       })}</div>`}
     </div>
-    ${manual && html`<${ManualAdd} onClose=${() => setManual(false)} onPick=${pid => { addPid(pid, 'manual'); setManual(false); }} />`}
+    ${manual && html`<${ManualAdd} game=${game} onClose=${() => setManual(false)} onPick=${pid => { addPid(pid, 'manual'); setManual(false); }} />`}
     ${editing && html`<${CardSheet} cardId=${editing} focus=${last?.pid} onClose=${() => setEditing(null)} />`}
     ${confirmClear && html`<${Confirm} text="Start a new session? The running total resets to €0. Your cards stay in the collection." yes="New session" onYes=${() => store.sessionClear()} onClose=${() => setConfirmClear(false)} />`}
   </div>`;
@@ -327,18 +359,20 @@ function LibraryView() {
   const [sort, setSort] = useState('value');
   const [setF, setSetF] = useState('');
   const [open, setOpen] = useState(null);
+  const game = useGame(s);
+  useEffect(() => { setColors([]); setTypes([]); setSetF(''); }, [game]);
 
   const totals = useMemo(() => {
     let v = 0, n = 0, u = 0;
     for (const [pid, e] of Object.entries(s.coll)) {
-      const k = (e.n || 0) + (e.f || 0); if (!k || !db.prById.has(pid)) continue;
+      const k = (e.n || 0) + (e.f || 0); if (!k || !db.prById.has(pid) || gameOf(pid) !== game) continue;
       n += k; u++; v += (e.n || 0) * (price(pid) || 0) + (e.f || 0) * (price(pid, true) || 0);
     }
     return { v, n, u };
-  }, [s.coll]);
+  }, [s.coll, game]);
 
   const rows = useMemo(() => {
-    const ids = new Set(filterCards({ q, colors, types }).map(c => c.id));
+    const ids = new Set(filterCards({ q, colors, types, game }).map(c => c.id));
     let list = db.printings.filter(p => ids.has(p.c) && (!setF || p.set === setF));
     if (owned) list = list.filter(p => store.qty(p.id) > 0);
     const val = p => { const e = s.coll[p.id] || {}; return (e.n || 0) * (price(p.id) || 0) + (e.f || 0) * (price(p.id, true) || 0); };
@@ -350,20 +384,21 @@ function LibraryView() {
       recent: (a, b) => (s.coll[b.id]?.t || 0) - (s.coll[a.id]?.t || 0),
     }[sort];
     return list.sort(by);
-  }, [s.coll, q, colors, types, owned, sort, setF]);
+  }, [s.coll, q, colors, types, owned, sort, setF, game]);
 
   return html`<div class="page">
+    <${GameSwitch} value=${game} onChange=${setGame} />
     <div class="stat-row">
-      <div><div class="label">Collection value</div><div class="total">${eur(totals.v)}</div></div>
-      <div class="right small muted">${totals.n} cards<br />${totals.u} different<br />prices ${pricesDate()}</div>
+      <div><div class="label">${GAMES[game].name} collection value</div><div class="total">${eur(totals.v)}</div></div>
+      <div class="right small muted">${totals.n} cards<br />${totals.u} different<br />prices ${pricesDate(game)}</div>
     </div>
     <input class="input" type="search" placeholder="Search cards, tags…" value=${q} onInput=${e => setQ(e.target.value)} />
-    <${ChipToggle} options=${Object.keys(COLORS)} value=${colors} onChange=${setColors} render=${c => html`<${Dot} color=${c} /> ${c}`} />
-    <${ChipToggle} options=${TYPES} value=${types} onChange=${setTypes} />
+    <${ChipToggle} options=${GAME_COLORS[game]} value=${colors} onChange=${setColors} render=${c => html`<${Dot} color=${c} /> ${c}`} />
+    <${ChipToggle} options=${GAME_TYPES[game]} value=${types} onChange=${setTypes} />
     <div class="row gap wrap">
       <button class=${cx('chip', owned && 'on')} onClick=${() => setOwned(!owned)}>${owned ? 'My cards' : 'All cards'}</button>
       <select class="select" value=${setF} onChange=${e => setSetF(e.target.value)} aria-label="Set">
-        <option value="">All sets</option>${db.setOrder.map(k => html`<option value=${k}>${setName(k)}</option>`)}
+        <option value="">All sets</option>${(db.games[game]?.setOrder || []).map(k => html`<option value=${k}>${setName(k)}</option>`)}
       </select>
       <select class="select" value=${sort} onChange=${e => setSort(e.target.value)} aria-label="Sort">
         <option value="value">Sort: value</option><option value="price">Sort: price</option><option value="name">Sort: name</option><option value="number">Sort: set & number</option><option value="recent">Sort: recently added</option>
@@ -377,7 +412,7 @@ function LibraryView() {
           <${Thumb} pid=${p.id} />
           <div class="grow left">
             <div class="name">${fullName(c)}</div>
-            <div class="small muted">${setShort(p.set)} #${p.no} · ${p.r}</div>
+            <div class="small muted">${prLabel(p)} · ${p.r}</div>
             <div class="small">${eur(price(p.id))} each</div>
           </div>
           <div class="col-end">
@@ -396,20 +431,22 @@ function LibraryView() {
 function DecksView() {
   const s = useStore();
   const [edit, setEdit] = useState(null);
-  const decks = Object.values(s.decks).sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  const game = useGame(s);
+  const decks = Object.values(s.decks).filter(d => deckGame(d) === game).sort((a, b) => (b.updated || 0) - (a.updated || 0));
   if (edit && s.decks[edit]) return html`<${DeckEditor} deck=${s.decks[edit]} onBack=${() => setEdit(null)} />`;
   const create = () => {
-    const d = { id: uid(), name: `Deck ${decks.length + 1}`, legends: [], main: {}, created: Date.now() };
+    const d = { id: uid(), game, name: `${GAMES[game].name} deck ${decks.length + 1}`, legends: [], main: {}, created: Date.now(), ...(game === 'mtg' ? { format: 'limited' } : {}) };
     store.saveDeck(d); setEdit(d.id);
   };
   return html`<div class="page">
-    <div class="row"><h2 class="grow">Decks</h2><button class="btn primary" onClick=${create}><${Icon} name="plus" size="18" /> New deck</button></div>
+    <${GameSwitch} value=${game} onChange=${setGame} />
+    <div class="row"><h2 class="grow">${GAMES[game].name} decks</h2><button class="btn primary" onClick=${create}><${Icon} name="plus" size="18" /> New deck</button></div>
     ${!decks.length && html`<p class="muted">Build decks from your library. The app checks the deck rules, shows which cards you own, and adds up what the missing cards cost on Cardmarket.</p>`}
     <div class="list">${decks.map(d => {
       const chk = checkDeck(d), need = deckNeeds(d, s.coll);
       return html`<button class="deck-row" onClick=${() => setEdit(d.id)}>
         <div class="grow left"><div class="name">${d.name}</div>
-          <div class="small muted">${d.legends.map(id => db.cardById.get(id)?.n).filter(Boolean).join(' · ') || 'No Legends yet'}</div>
+          <div class="small muted">${deckGame(d) === 'mtg' ? MTG_FORMATS[d.format || 'limited'].name : (d.legends || []).map(id => db.cardById.get(id)?.n).filter(Boolean).join(' · ') || 'No Legends yet'}</div>
           <div class="small">${chk.mainCount} cards · ${need.ownedCopies}/${need.totalCopies} owned</div></div>
         <div class="col-end">${chk.legal ? html`<span class="ok-badge"><${Icon} name="check" size="14" /> Legal</span>` : html`<span class="bad-badge">${chk.problems} issue${chk.problems === 1 ? '' : 's'}</span>`}
           ${need.missingCost > 0 && html`<span class="small">Missing ${eur(need.missingCost)}</span>`}</div>
@@ -421,25 +458,31 @@ function DecksView() {
 function DeckEditor({ deck, onBack }) {
   const s = useStore();
   const [q, setQ] = useState('');
-  const [types, setTypes] = useState([]);
+  const [typeF, setTypeF] = useState([]);
   const [colors, setColors] = useState([]);
   const [fits, setFits] = useState(true);
   const [ownedOnly, setOwnedOnly] = useState(false);
   const [view, setView] = useState('deck');
   const [del, setDel] = useState(false);
   const [open, setOpen] = useState(null);
+  const game = deckGame(deck), isMtg = game === 'mtg';
+  const types = GAME_TYPES[game];
   const chk = checkDeck(deck);
   const need = deckNeeds(deck, s.coll);
   const own = id => ownedByCard(id, s.coll);
   const save = patch => store.saveDeck({ ...deck, ...patch });
   const setCount = (id, d) => {
     const main = { ...deck.main };
-    main[id] = Math.max(0, Math.min(3, (main[id] || 0) + d));
+    main[id] = Math.max(0, Math.min(copyLimit(deck, db.cardById.get(id)), (main[id] || 0) + d));
     if (!main[id]) delete main[id];
     save({ main });
   };
   const addCard = c => {
-    if (c.t === 'Legend') {
+    if (isMtg) {
+      const lim = copyLimit(deck, c);
+      if ((deck.main[c.id] || 0) >= lim) toast(`Max ${lim} copies in ${MTG_FORMATS[deck.format || 'limited'].name.replace(/ \(.*/, '')}`);
+      else setCount(c.id, 1);
+    } else if (c.t === 'Legend') {
       if (deck.legends.includes(c.id)) return toast('That Legend is already in the deck');
       if (deck.legends.length >= 3) return toast('A deck has exactly 3 Legends — remove one first');
       save({ legends: [...deck.legends, c.id] });
@@ -447,19 +490,23 @@ function DeckEditor({ deck, onBack }) {
     else setCount(c.id, 1);
   };
   const results = useMemo(() => {
-    let r = filterCards({ q, types, colors });
-    if (fits) r = r.filter(c => c.t === 'Legend' || chk.fits(c));
+    let r = filterCards({ q, types: typeF, colors, game });
+    if (fits && !isMtg) r = r.filter(c => c.t === 'Legend' || chk.fits(c));
     if (ownedOnly) r = r.filter(c => own(c.id) > 0);
     return r.slice(0, 80);
-  }, [q, types, colors, fits, ownedOnly, deck, s.coll]);
+  }, [q, typeF, colors, fits, ownedOnly, deck, s.coll]);
 
   const mainCards = Object.entries(deck.main).map(([id, n]) => ({ c: db.cardById.get(id), n })).filter(x => x.c)
-    .sort((a, b) => TYPES.indexOf(a.c.t) - TYPES.indexOf(b.c.t) || (a.c.cost ?? 0) - (b.c.cost ?? 0) || a.c.n.localeCompare(b.c.n));
+    .sort((a, b) => types.indexOf(a.c.t) - types.indexOf(b.c.t) || (a.c.cost ?? 0) - (b.c.cost ?? 0) || a.c.n.localeCompare(b.c.n));
+  const sections = isMtg ? [...types, 'Other'] : types.slice(1);
+  const info = c => (isMtg ? `${c.mc ? c.mc.replace(/[{}]/g, '') + ' · ' : ''}${c.t}` : `${c.cost != null ? `cost ${c.cost} · ` : ''}RAM ${c.ram ?? '–'}`);
 
   return html`<div class="page">
     <div class="row gap"><button class="btn small" onClick=${onBack}>‹ Decks</button>
       <input class="input grow" value=${deck.name} onChange=${e => save({ name: e.target.value || 'Deck' })} aria-label="Deck name" />
       <button class="icon-btn" aria-label="Delete deck" onClick=${() => setDel(true)}><${Icon} name="x" /></button></div>
+    ${isMtg && html`<label class="field">Format
+      <select class="select" value=${deck.format || 'limited'} onChange=${e => save({ format: e.target.value })}>${Object.entries(MTG_FORMATS).map(([k, f]) => html`<option value=${k}>${f.name}</option>`)}</select></label>`}
 
     <div class="checks">
       ${chk.checks.map(x => html`<div class=${cx('check', x.ok ? 'ok' : 'bad')}><${Icon} name=${x.ok ? 'check' : 'x'} size="14" /> ${x.text}</div>`)}
@@ -473,33 +520,33 @@ function DeckEditor({ deck, onBack }) {
     </div>
 
     ${view === 'deck' && html`
-      <h4>Legends <span class="muted small">${chk.ramText}</span></h4>
+      ${isMtg ? chk.ramText && html`<p class="small muted">${chk.ramText}</p>` : html`<h4>Legends <span class="muted small">${chk.ramText}</span></h4>
       <div class="list">${deck.legends.map(id => { const c = db.cardById.get(id); return c && html`<div class="deck-card">
         <${Dot} color=${c.c} /><span class="grow" onClick=${() => setOpen(id)}>${fullName(c)} <span class="muted small">RAM ${c.ram}</span></span>
         <span class=${cx('own', own(id) >= 1 ? 'yes' : 'no')}>${own(id) >= 1 ? 'owned' : 'missing'}</span>
         <button class="icon-btn" aria-label="Remove" onClick=${() => save({ legends: deck.legends.filter(x => x !== id) })}><${Icon} name="x" size="16" /></button></div>`; })}
-        ${deck.legends.length < 3 && html`<button class="btn small" onClick=${() => { setTypes(['Legend']); setView('add'); }}>+ Add Legend (${3 - deck.legends.length} left)</button>`}
-      </div>
-      ${TYPES.slice(1).map(t => { const list = mainCards.filter(x => x.c.t === t); return list.length > 0 && html`
-        <h4>${t}s <span class="muted small">${list.reduce((a, x) => a + x.n, 0)}</span></h4>
+        ${deck.legends.length < 3 && html`<button class="btn small" onClick=${() => { setTypeF(['Legend']); setView('add'); }}>+ Add Legend (${3 - deck.legends.length} left)</button>`}
+      </div>`}
+      ${sections.map(t => { const list = mainCards.filter(x => (t === 'Other' ? !types.includes(x.c.t) : x.c.t === t)); return list.length > 0 && html`
+        <h4>${t === 'Sorcery' ? 'Sorceries' : t === 'Other' ? 'Other' : t + 's'} <span class="muted small">${list.reduce((a, x) => a + x.n, 0)}</span></h4>
         <div class="list">${list.map(({ c, n }) => html`<div class=${cx('deck-card', !chk.fits(c) && 'illegal')}>
-          <${Dot} color=${c.c} /><span class="grow" onClick=${() => setOpen(c.id)}>${fullName(c)} <span class="muted small">${c.cost != null ? `cost ${c.cost} · ` : ''}RAM ${c.ram ?? '–'}</span></span>
+          <${Dot} color=${c.c} /><span class="grow" onClick=${() => setOpen(c.id)}>${fullName(c)} <span class="muted small">${info(c)}</span></span>
           <span class=${cx('own', own(c.id) >= n ? 'yes' : 'no')}>${Math.min(own(c.id), n)}/${n}</span>
-          <${Stepper} value=${n} max=${3} label="Copies" onChange=${d => setCount(c.id, d)} /></div>`)}</div>`; })}
+          <${Stepper} value=${n} max=${copyLimit(deck, c)} label="Copies" onChange=${d => setCount(c.id, d)} /></div>`)}</div>`; })}
       ${!mainCards.length && html`<p class="muted">No cards yet. Tap “Add cards”.</p>`}`}
 
     ${view === 'add' && html`
       <input class="input" type="search" placeholder="Search…" value=${q} onInput=${e => setQ(e.target.value)} />
-      <${ChipToggle} options=${TYPES} value=${types} onChange=${setTypes} />
-      <${ChipToggle} options=${Object.keys(COLORS)} value=${colors} onChange=${setColors} render=${c => html`<${Dot} color=${c} /> ${c}`} />
+      <${ChipToggle} options=${types} value=${typeF} onChange=${setTypeF} />
+      <${ChipToggle} options=${GAME_COLORS[game]} value=${colors} onChange=${setColors} render=${c => html`<${Dot} color=${c} /> ${c}`} />
       <div class="row gap wrap">
-        <button class=${cx('chip', fits && 'on')} onClick=${() => setFits(!fits)}>Fits my Legends</button>
+        ${!isMtg && html`<button class=${cx('chip', fits && 'on')} onClick=${() => setFits(!fits)}>Fits my Legends</button>`}
         <button class=${cx('chip', ownedOnly && 'on')} onClick=${() => setOwnedOnly(!ownedOnly)}>Only cards I own</button>
       </div>
       <div class="list">${results.map(c => {
-        const inDeck = c.t === 'Legend' ? (deck.legends.includes(c.id) ? 1 : 0) : deck.main[c.id] || 0;
+        const inDeck = !isMtg && c.t === 'Legend' ? (deck.legends.includes(c.id) ? 1 : 0) : deck.main[c.id] || 0;
         return html`<div class="deck-card"><${Dot} color=${c.c} />
-          <span class="grow" onClick=${() => setOpen(c.id)}>${fullName(c)}<div class="small muted">${c.t} · ${c.cost != null ? `cost ${c.cost} · ` : ''}RAM ${c.ram ?? '–'} · own ${own(c.id)}</div></span>
+          <span class="grow" onClick=${() => setOpen(c.id)}>${fullName(c)}<div class="small muted">${isMtg ? info(c) : `${c.t} · ${info(c)}`} · own ${own(c.id)}</div></span>
           ${inDeck > 0 && html`<span class="qty">×${inDeck}</span>`}
           <button class="icon-btn add" aria-label="Add to deck" onClick=${() => addCard(c)}><${Icon} name="plus" /></button></div>`;
       })}</div>`}
@@ -510,7 +557,7 @@ function DeckEditor({ deck, onBack }) {
       <div class="list">${need.missing.map(m => html`<div class="deck-card">
         <${Dot} color=${m.card.c} /><span class="grow">${fullName(m.card)}<div class="small muted">need ${m.need} more${m.cheap ? ` · ${eur(m.cheap.v)} each (${setShort(db.prById.get(m.cheap.pid).set)})` : ''}</div></span>
         <b>${eur(m.cost)}</b>
-        <a class="icon-btn" aria-label="Open on Cardmarket" href=${m.cheap ? cmLink(m.cheap.pid) : CM_SEARCH(m.card.n)} target="_blank" rel="noopener"><${Icon} name="ext" size="18" /></a></div>`)}</div>
+        <a class="icon-btn" aria-label="Open on Cardmarket" href=${m.cheap ? cmLink(m.cheap.pid) : CM_SEARCH(m.card.n, game)} target="_blank" rel="noopener"><${Icon} name="ext" size="18" /></a></div>`)}</div>
       <div class="stat-row"><span>Total to complete</span><b class="total">${eur(need.missingCost)}</b></div>`}`}
 
     ${open && html`<${CardSheet} cardId=${open} onClose=${() => setOpen(null)} />`}
@@ -525,7 +572,7 @@ function SettingsView({ installEvt }) {
   const st = s.settings;
   const fileRef = useRef(null);
   const [reset, setReset] = useState(false);
-  const fpSets = useMemo(() => db.setOrder.filter(k => db.printings.some(p => p.set === k)), []);
+  const fpSets = useMemo(() => (db.games.cyberpunk?.setOrder || []).filter(k => db.printings.some(p => p.set === k)), []);
   const exportFile = () => {
     const blob = new Blob([store.exportJSON()], { type: 'application/json' });
     const a = document.createElement('a');
@@ -554,7 +601,7 @@ function SettingsView({ installEvt }) {
     </section>
 
     <section><h4>Scanner</h4>
-      <label class="field">When Beta and Retail look the same, pick
+      <label class="field">Cyberpunk: when Beta and Retail look the same, pick
         <select class="select" value=${st.preferSet} onChange=${e => store.set({ preferSet: e.target.value })}>${fpSets.map(k => html`<option value=${k}>${setName(k)}</option>`)}</select></label>
       <label class="field">Sensitivity <span class="muted small">(raise it if cards aren’t picked up, lower it if wrong cards are added)</span>
         <input type="range" min="0" max="3" step="0.5" value=${st.sensitivity} onInput=${e => store.set({ sensitivity: +e.target.value })} /></label>
@@ -565,7 +612,7 @@ function SettingsView({ installEvt }) {
     </section>
 
     <section><h4>Prices</h4>
-      <p class="small muted">Cardmarket “price trend” in euros, from Cardmarket’s daily price guide (updated ${pricesDate()}). Foil-only versions (Epic, Iconic, Secret, Nova) use the foil trend; versions too new to have a trend use the lowest listing. A few promo versions aren’t sold on Cardmarket yet and show “–”.</p>
+      <p class="small muted">Cardmarket “price trend” in euros, from Cardmarket’s daily price guides (Cyberpunk updated ${pricesDate('cyberpunk')}${hasGame('mtg') ? `, Magic updated ${pricesDate('mtg')}` : ''}). Foil-only versions (Epic, Iconic, Secret, Nova) use the foil trend; versions too new to have a trend use the lowest listing. A few promo versions aren’t sold on Cardmarket yet and show “–”. Magic cards are matched to Cardmarket by Scryfall’s product ids.</p>
     </section>
 
     <section><h4>Backup</h4>
@@ -578,7 +625,7 @@ function SettingsView({ installEvt }) {
     </section>
 
     <section class="small muted"><h4>About</h4>
-      <p>Unofficial fan tool for personal use. Card data and pictures come from the official Cyberpunk TCG card database. Prices come from Cardmarket’s public price guide. Not affiliated with WeirdCo, CD PROJEKT RED or Cardmarket.</p>
+      <p>Unofficial fan tool for personal use. Cyberpunk card data and pictures come from the official Cyberpunk TCG card database; Magic card data and pictures from Scryfall. Prices come from Cardmarket’s public price guides. Not affiliated with WeirdCo, CD PROJEKT RED, Wizards of the Coast, Scryfall or Cardmarket. Magic: The Gathering is © Wizards of the Coast.</p>
     </section>
     ${reset && html`<${Confirm} text="Remove every card from your collection? Decks are kept. This can't be undone (export a backup first)." yes="Clear collection" onYes=${() => { store.resetCollection(); toast('Collection cleared'); }} onClose=${() => setReset(false)} />`}
   </div>`;

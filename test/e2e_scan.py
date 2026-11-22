@@ -10,6 +10,10 @@ from playwright.sync_api import sync_playwright
 
 ROOT = os.path.abspath(sys.argv[1])
 PHASE = sys.argv[2] if len(sys.argv) > 2 else 'run'
+GAME = sys.argv[3] if len(sys.argv) > 3 else 'cyberpunk'   # cyberpunk | mtg
+GDIR = os.path.join(ROOT, 'data') if GAME == 'cyberpunk' else os.path.join(ROOT, 'data', 'mtg')
+IMG_DIR = os.path.join(ROOT, '.cache', 'img' if GAME == 'cyberpunk' else 'mtg-img')
+MAIN_SET = 'welcometonightcityretail' if GAME == 'cyberpunk' else 'sos'
 TMP = '/tmp/deckscan-e2e'
 VW, VH, FPS = 1280, 720, 10
 OW, OH = 960, 540  # size of the fake camera video file
@@ -80,6 +84,7 @@ def launch(p, video):
 
 def open_scan(browser):
     ctx = browser.new_context(viewport=VIEWPORT, device_scale_factor=2, is_mobile=True, has_touch=True)
+    ctx.add_init_script("localStorage.setItem('deckscan.v1', JSON.stringify({settings: {game: '%s'}}))" % GAME)
     page = ctx.new_page()
     logs = []
     page.on('console', lambda m: logs.append(f'{m.type}: {m.text}'))
@@ -103,23 +108,26 @@ def main():
             b.close(); return
 
         rect = json.load(open(os.path.join(TMP, 'rect.json')))
-        fp = json.load(open(os.path.join(ROOT, 'data/fp.json')))
-        cards_json = json.load(open(os.path.join(ROOT, 'data/cards.json')))
+        fp = json.load(open(os.path.join(GDIR, 'fp.json')))
+        cards_json = json.load(open(os.path.join(GDIR, 'cards.json')))
         pr = {x['id']: x for x in cards_json['printings']}
         random.seed(3)
         # pick printings from distinct art groups; prefer Retail members (what the app should pick)
-        by_group = {}
+        by_group, ref_of = {}, {}
+        refs_cache = json.load(open(os.path.join(ROOT, '.cache', 'fp-cache.json' if GAME == 'cyberpunk' else 'mtg-fp-cache.json')))
         for i, pid in enumerate(fp['ids']):
             by_group.setdefault(fp['group'][i], []).append(pid)
+            ref_of.setdefault(fp['group'][i], pid if pid in refs_cache else pid + '#b')
         groups = random.sample(sorted(by_group), 8)
         picks = []
         for g in groups:
             members = by_group[g]
-            retail = [m for m in members if pr[m]['set'] == 'welcometonightcityretail']
+            retail = [m for m in members if pr[m]['set'] == MAIN_SET]
             picks.append((retail or members)[0])
+        pick_refs = [p if os.path.exists(os.path.join(IMG_DIR, f'{p}.png')) else p + '#b' for p in picks]
         picks.insert(3, picks[2])  # the same card twice in a row (two copies)
-        img_dir = os.path.join(ROOT, '.cache/img')
-        dur = card_video(os.path.join(TMP, 'cards.y4m'), rect, [os.path.join(img_dir, f'{pid}.png') for pid in picks])
+        pick_refs.insert(3, pick_refs[2])
+        dur = card_video(os.path.join(TMP, 'cards.y4m'), rect, [os.path.join(IMG_DIR, f'{r}.png') for r in pick_refs])
         b = launch(p, os.path.join(TMP, 'cards.y4m'))
         page, logs = open_scan(b)  # fresh browser context: empty collection
         t0 = time.time()

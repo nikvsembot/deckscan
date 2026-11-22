@@ -51,4 +51,6 @@ service cloud.firestore {
 }
 ```
 
+Supports **Cyberpunk TCG** and **Magic: The Gathering** (Secrets of Strixhaven: main set, Mystical Archive, Special Guests, promos — add more Magic sets in `scripts/build-mtg.mjs`).
+
 Unofficial fan tool for personal use; not affiliated with WeirdCo, CD PROJEKT RED or Cardmarket.

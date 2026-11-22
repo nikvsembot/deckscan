@@ -26,7 +26,20 @@ pool = [c for c in cards['cards'] if c['t'] != 'Legend' and c['c'] in colors]
 main = {c['id']: 3 for c in pool[:13]}
 main[pool[13]['id']] = 2   # 41 cards
 deck = {'id': 'd1', 'name': 'Test deck', 'legends': [c['id'] for c in chosen], 'main': main, 'updated': 1}
-state = {'coll': coll, 'decks': {'d1': deck}, 'settings': {'images': True}, 'session': []}
+decks = {'d1': deck}
+mtg_path = os.path.join(ROOT, 'data/mtg/cards.json')
+HAS_MTG = os.path.exists(mtg_path)
+if HAS_MTG:
+    mcards = json.load(open(mtg_path))
+    for i, p in enumerate(random.sample(mcards['printings'], 25)):
+        coll[p['id']] = {'n': random.randint(1, 4), 'f': 0, 't': 1700000100000 + i}
+    nonland = [c for c in mcards['cards'] if c['t'] != 'Land'][:12]
+    basic = [c for c in mcards['cards'] if c.get('basic')]
+    mmain = {c['id']: 2 for c in nonland[:11]}
+    mmain[nonland[11]['id']] = 5            # 5 copies: fine in Limited, too many in Constructed
+    if basic: mmain[basic[0]['id']] = 17
+    decks['m1'] = {'id': 'm1', 'game': 'mtg', 'format': 'limited', 'name': 'Strixhaven sealed', 'legends': [], 'main': mmain, 'updated': 2}
+state = {'coll': coll, 'decks': decks, 'settings': {'images': True}, 'session': []}
 
 errors = []
 with sync_playwright() as p:
@@ -63,6 +76,31 @@ with sync_playwright() as p:
     page.get_by_role('button', name='Settings').click()
     page.wait_for_selector('.settings')
     page.screenshot(path=f'{OUT}/settings.png', full_page=True)
+    mtg = {}
+    if HAS_MTG:
+        page.get_by_role('button', name='Library').click()
+        page.locator('.seg button', has_text='Magic').click()
+        page.wait_for_selector('.lib-row')
+        mtg['library_rows'] = page.locator('.lib-row').count()
+        mtg['library_total'] = page.locator('.stat-row .total').inner_text()
+        page.screenshot(path=f'{OUT}/mtg-library.png')
+        page.locator('.lib-row').first.click(); page.wait_for_selector('.sheet')
+        mtg['sheet_meta'] = page.locator('.card-detail .meta').inner_text().replace('\n', ' | ')
+        page.screenshot(path=f'{OUT}/mtg-sheet.png')
+        page.locator('.sheet .icon-btn[aria-label="Close"]').click()
+        page.get_by_role('button', name='Decks').click()
+        page.wait_for_selector('.deck-row')
+        mtg['deck_list'] = page.locator('.deck-row').all_inner_texts()
+        page.locator('.deck-row').first.click(); page.wait_for_selector('.checks')
+        mtg['limited_checks'] = page.locator('.check').all_inner_texts()
+        page.locator('select.select').first.select_option('constructed')
+        page.wait_for_timeout(300)
+        mtg['constructed_checks'] = page.locator('.check').all_inner_texts()
+        page.screenshot(path=f'{OUT}/mtg-deck.png', full_page=True)
+        page.get_by_role('button', name='Scan').click()
+        page.wait_for_selector('.cam-game .seg')
+        mtg['scan_game_switch'] = page.locator('.cam-game .seg button.on').inner_text()
+        page.screenshot(path=f'{OUT}/mtg-scan.png')
     b.close()
 httpd.shutdown()
-print(json.dumps({'library_rows': n_rows, 'collection_total': total, 'stepper': [before, after], 'checks': checks, 'missing_total': missing_total, 'errors': errors[:10]}, indent=1))
+print(json.dumps({'mtg': mtg if HAS_MTG else None, 'library_rows': n_rows, 'collection_total': total, 'stepper': [before, after], 'checks': checks, 'missing_total': missing_total, 'errors': errors[:10]}, indent=1))

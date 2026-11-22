@@ -5,6 +5,7 @@ const DEFAULT_SETTINGS = {
   preferSet: 'welcometonightcityretail', // which printing to pick when Beta/Retail share artwork
   sensitivity: 1,                        // 0 strict … 3 loose
   sound: true, vibrate: true, debug: false, images: true,
+  game: 'cyberpunk',                     // which game the Scan / Library / Decks tabs show
 };
 
 function load() {

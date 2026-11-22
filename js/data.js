@@ -1,70 +1,96 @@
-// Card catalogue, Cardmarket prices, scan fingerprints, and card images.
+// Card catalogues (Cyberpunk TCG + Magic), Cardmarket prices, scan fingerprints, and card images.
 import { Matcher, DIM } from '../lib/fp.js';
 
+export const GAMES = {
+  cyberpunk: { name: 'Cyberpunk', dir: 'data', cm: 'Cyberpunk' },
+  mtg: { name: 'Magic', dir: 'data/mtg', cm: 'Magic' },
+};
 const API = 'https://api.netdeck.gg/api/cards/cyberpunk';
-export const CM_PRODUCT = id => `https://www.cardmarket.com/en/Cyberpunk/Products?idProduct=${id}`;
-export const CM_SEARCH = q => `https://www.cardmarket.com/en/Cyberpunk/Products/Search?searchString=${encodeURIComponent(q)}`;
+export const CM_PRODUCT = (id, game = 'cyberpunk') => `https://www.cardmarket.com/en/${GAMES[game].cm}/Products?idProduct=${id}`;
+export const CM_SEARCH = (q, game = 'cyberpunk') => `https://www.cardmarket.com/en/${GAMES[game].cm}/Products/Search?searchString=${encodeURIComponent(q)}`;
 
 export const db = {
   ready: false,
   cards: [], cardById: new Map(),
   printings: [], prById: new Map(), prByCard: new Map(),
   sets: {}, setOrder: [],
-  prices: { p: {}, updatedAt: null },
-  matcher: null, fpIds: [], groupMembers: new Map(), thresholds: null,
+  prices: { p: {} },
+  games: {},     // game -> { loaded, setOrder, pricesAt }
+  matchers: {},  // game -> { matcher, fpIds, thresholds, groupMembers }
 };
 
-export async function loadData() {
-  const v = Math.floor(Date.now() / 36e5); // hourly cache-buster; the service worker also refreshes data files
+const bust = () => Math.floor(Date.now() / 36e5); // hourly cache-buster; the service worker also refreshes data files
+async function loadGame(game) {
+  const dir = GAMES[game].dir, v = bust();
   const [cards, prices] = await Promise.all([
-    fetch(`data/cards.json?v=${v}`).then(r => r.json()),
-    fetch(`data/prices.json?v=${v}`).then(r => r.json()).catch(() => ({ p: {} })),
+    fetch(`${dir}/cards.json?v=${v}`).then(r => { if (!r.ok) throw new Error(`${GAMES[game].name} cards: HTTP ${r.status}`); return r.json(); }),
+    fetch(`${dir}/prices.json?v=${v}`).then(r => r.json()).catch(() => ({ p: {} })),
   ]);
-  db.cards = cards.cards;
-  db.cardById = new Map(cards.cards.map(c => [c.id, c]));
-  db.sets = cards.sets; db.setOrder = cards.setOrder;
-  db.printings = cards.printings;
-  db.prById = new Map(cards.printings.map(p => [p.id, p]));
+  for (const c of cards.cards) c.game = game;
+  return { cards, prices };
+}
+
+export async function loadData() {
+  const loaded = {};
+  loaded.cyberpunk = await loadGame('cyberpunk');
+  try { loaded.mtg = await loadGame('mtg'); } catch { /* Magic data not built yet: the app still works for Cyberpunk */ }
+  db.cards = []; db.printings = []; db.sets = {}; db.setOrder = []; db.prices = { p: {} };
+  for (const [game, { cards, prices }] of Object.entries(loaded)) {
+    db.cards.push(...cards.cards);
+    db.printings.push(...cards.printings);
+    Object.assign(db.sets, cards.sets);
+    db.setOrder.push(...cards.setOrder);
+    Object.assign(db.prices.p, prices.p);
+    db.games[game] = { loaded: true, setOrder: cards.setOrder, pricesAt: prices.updatedAt || null };
+  }
+  db.cardById = new Map(db.cards.map(c => [c.id, c]));
+  db.prById = new Map(db.printings.map(p => [p.id, p]));
   db.prByCard = new Map();
-  for (const p of cards.printings) {
+  for (const p of db.printings) {
     if (!db.prByCard.has(p.c)) db.prByCard.set(p.c, []);
     db.prByCard.get(p.c).push(p);
   }
-  db.prices = prices;
   db.ready = true;
   return db;
 }
+export const hasGame = game => !!db.games[game]?.loaded;
 
-export async function loadMatcher() {
-  if (db.matcher) return db.matcher;
-  const v = Math.floor(Date.now() / 36e5); // hourly cache-buster; the service worker also refreshes data files
+export async function loadMatcher(game = 'cyberpunk') {
+  if (db.matchers[game]) return db.matchers[game];
+  const dir = GAMES[game].dir, v = bust();
   const [meta, bin] = await Promise.all([
-    fetch(`data/fp.json?v=${v}`).then(r => r.json()),
-    fetch(`data/fp.bin?v=${v}`).then(r => r.arrayBuffer()),
+    fetch(`${dir}/fp.json?v=${v}`).then(r => r.json()),
+    fetch(`${dir}/fp.bin?v=${v}`).then(r => r.arrayBuffer()),
   ]);
   if (meta.dim !== DIM) throw new Error('Fingerprint format changed — reload the app');
   const groups = Int32Array.from(meta.group);
-  db.matcher = new Matcher(new Int8Array(bin), Float32Array.from(meta.scales), groups, meta.mean ? Float32Array.from(meta.mean) : null);
-  db.fpIds = meta.ids;
-  db.thresholds = meta.thresholds;
-  db.groupMembers = new Map();
+  const groupMembers = new Map();
   meta.ids.forEach((id, i) => {
     const g = groups[i];
-    if (!db.groupMembers.has(g)) db.groupMembers.set(g, []);
-    db.groupMembers.get(g).push(id);
+    if (!groupMembers.has(g)) groupMembers.set(g, []);
+    if (!groupMembers.get(g).includes(id)) groupMembers.get(g).push(id);
   });
-  return db.matcher;
+  db.matchers[game] = {
+    matcher: new Matcher(new Int8Array(bin), Float32Array.from(meta.scales), groups, meta.mean ? Float32Array.from(meta.mean) : null),
+    fpIds: meta.ids, thresholds: meta.thresholds, groupMembers,
+  };
+  return db.matchers[game];
 }
 
 // ---------- names, sets, prices ----------
 export const cardOf = pid => db.cardById.get(db.prById.get(pid)?.c);
+export const gameOf = pid => cardOf(pid)?.game || 'cyberpunk';
 export const fullName = c => (c ? (c.s ? `${c.n} — ${c.s}` : c.n) : '?');
 export const setName = code => db.sets[code]?.name || code;
+const MTG_SHORT = { sos: 'SOS', soa: 'Archive', spg: 'Guest', psos: 'Promo' };
 export function setShort(code) {
+  if (MTG_SHORT[code]) return MTG_SHORT[code];
   const n = setName(code);
   if (/Welcome to Night City/.test(n)) return /Beta/.test(n) ? 'WNC Beta' : 'WNC Retail';
   return n.replace(/ Starter Deck/, ' SD').replace(/Edgerunner Open S 1/, 'Edgerunner Open').replace(/ – /g, ' ');
 }
+/** "WNC Retail #005a" or "SOS #312 · Borderless" */
+export const prLabel = p => (p ? `${setShort(p.set)} #${p.no}${p.v ? ' · ' + p.v : ''}` : '');
 export const isFoilOnly = pr => pr && /Iconic|Secret|Nova/.test(pr.r);
 
 /**
@@ -83,10 +109,10 @@ export function price(pid, foil = false) {
 }
 export const productId = pid => db.prices.p[pid]?.[0] ?? null;
 export function cmLink(pid) {
-  const id = productId(pid);
-  return id ? CM_PRODUCT(id) : CM_SEARCH(cardOf(pid)?.n || '');
+  const id = productId(pid), game = gameOf(pid);
+  return id ? CM_PRODUCT(id, game) : CM_SEARCH(cardOf(pid)?.n || '', game);
 }
-/** Cheapest English printing of a card (for "cost to complete a deck"). */
+/** Cheapest printing of a card (for "cost to complete a deck"). */
 export function cheapest(cardId) {
   let best = null;
   for (const p of db.prByCard.get(cardId) || []) {
@@ -98,26 +124,31 @@ export function cheapest(cardId) {
 
 export const eur = v => (v == null ? '–' : '€' + (v >= 1000 ? Math.round(v).toLocaleString('en') : v.toFixed(2)));
 
-export function pricesDate() {
-  const d = db.prices.updatedAt ? new Date(db.prices.updatedAt.replace(/(\d\d)(\d\d)$/, '$1:$2')) : null;
+export function pricesDate(game = 'cyberpunk') {
+  const at = db.games[game]?.pricesAt;
+  const d = at ? new Date(at.replace(/(\d\d)(\d\d)$/, '$1:$2')) : null;
   return d && !isNaN(d) ? d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : 'unknown';
 }
 
-/** Preferred printing among identical-artwork printings (e.g. Retail over Beta). */
+/** Preferred printing among identical-artwork printings (e.g. Retail over Beta, main set over promo). */
 export function preferredMember(members, preferSet) {
   const order = [preferSet, ...db.setOrder.filter(s => s !== preferSet)];
-  return [...members].sort((a, b) => order.indexOf(db.prById.get(a).set) - order.indexOf(db.prById.get(b).set))[0];
+  const rank = id => { const p = db.prById.get(id); return (order.indexOf(p?.set) + 1 || 999) * 1000 + (p?.v ? 1 : 0); };
+  return [...members].sort((a, b) => rank(a) - rank(b))[0];
 }
 
-// ---------- images (signed links expire after ~5 min, so fetch per card, on demand) ----------
+// ---------- images ----------
+// Magic: Scryfall picture links are permanent. Cyberpunk: signed links expire after ~5 min, so fetch per card, on demand.
 const img = new Map();   // printing id -> { url, at }
 const inflight = new Map();
 const FRESH_MS = 4 * 60 * 1000;
 
 export async function imageUrl(pid) {
+  const pr = db.prById.get(pid);
+  if (pr?.img) return pr.img;
   const hit = img.get(pid);
   if (hit && Date.now() - hit.at < FRESH_MS) return hit.url;
-  const card = db.prById.get(pid)?.c;
+  const card = pr?.c;
   if (!card) return null;
   if (!inflight.has(card)) {
     inflight.set(card, fetch(`${API}/${encodeURIComponent(card)}`)

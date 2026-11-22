@@ -51,8 +51,23 @@ jobs:
           SELFTEST_ROUNDS: ${{ github.event.inputs.selftest || '2' }}
         run: node scripts/build-data.mjs
 
+      - name: Build Magic data (Scryfall cards + Cardmarket Magic prices)
+        env:
+          SELFTEST_ROUNDS: ${{ github.event.inputs.selftest || '2' }}
+          NODE_OPTIONS: --max-old-space-size=6144
+        # if Scryfall or Cardmarket fails, keep yesterday's Magic data instead of dropping Magic from the app
+        run: |
+          if node scripts/build-mtg.mjs; then
+            rm -rf .cache/mtg-last && cp -r data/mtg .cache/mtg-last
+          else
+            echo "::warning::Magic data build failed; using the last good Magic data"
+            rm -rf data/mtg && (cp -r .cache/mtg-last data/mtg || true)
+          fi
+
       - name: Show data report
-        run: cat data/meta.json
+        run: |
+          cat data/meta.json
+          cat data/mtg/meta.json || echo "no Magic data"
 
       - name: Assemble site
         run: |
