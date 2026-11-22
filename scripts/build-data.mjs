@@ -72,9 +72,11 @@ async function loadCards() {
   // Rules text, for the Claude deck advisor: any text-like string field the API has.
   const fieldSet = new Set(items.slice(0, 200).flatMap(c => Object.keys(c)));
   log('card API fields: ' + [...fieldSet].join(', '));
-  const textKeys = [...fieldSet].filter(k => /text|effect|abilit|rule|keyword|flavou?r/i.test(k));
+  const str = x => (typeof x === 'string' ? x : Array.isArray(x) ? x.map(y => (typeof y === 'string' ? y : y?.name || y?.text || '')).filter(Boolean).join(', ') : '');
   for (const c of items) {
-    const t = textKeys.map(k => (typeof c[k] === 'string' ? c[k] : Array.isArray(c[k]) ? c[k].map(x => (typeof x === 'string' ? x : x?.text || x?.name || '')).join(' ') : '')).filter(Boolean).join('\n');
+    const rules = str(c.official_rules_text_en) || str(c.rules_text) || str(c.official_rules_text) || str(c.printed_rules_text);
+    const kw = str(c.keywords);
+    const t = [kw && `Keywords: ${kw}`, rules].filter(Boolean).join('\n');
     if (t) texts[c.slug] = t;
     cards.push({
       id: c.slug, n: c.name, s: c.subname || '', t: c.card_type, c: c.color,
