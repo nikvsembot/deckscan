@@ -5,7 +5,8 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
-import { integral, fingerprint, quantize, center, DIM, GW, GH, Matcher } from '../lib/fp.js';
+import { integral, fingerprint, quantize, center, boxWeights, DIM, GW, GH, Matcher } from '../lib/fp.js';
+export { boxWeights };
 
 export const UA = 'deckscan-data-job/1.0 (personal collection app; daily)';
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -56,10 +57,27 @@ export async function rawRGBA(pngOrJpg) {
 }
 
 /** printings: [{id, c, set, no}] (id = reference id); imgUrl: id -> {url, key}; opts: {cacheFile, imgDir, concurrency, delayMs} */
-export async function buildFingerprints(printings, imgUrl, needImages, { cacheFile, imgDir, concurrency = 6, delayMs = 0, refBlur = 0 }) {
+/** Fingerprint of one reference image: optionally blurred like a camera, optionally averaged with simulated shots. */
+export async function refFingerprint(png, { refBlur = 0, weights = null, aug = 0, seed = 777 } = {}) {
+  const one = async buf => { const { data, w, h } = await rawRGBA(buf); return fingerprint(integral(data, w, h), { x: 0, y: 0, w, h }, weights); };
+  const base = await one(refBlur > 0 ? await sharp(png).blur(refBlur).png().toBuffer() : png);
+  if (!aug) return base;
+  const R = rng(seed), acc = Float32Array.from(base.v);
+  for (let k = 0; k < aug; k++) {
+    const shot = await simulateShot(png, R);
+    const f = fingerprint(integral(shot.data, shot.w, shot.h), { x: 0, y: 0, w: shot.w, h: shot.h }, weights).v;
+    for (let i = 0; i < DIM; i++) acc[i] += f[i];
+  }
+  let ss = 0; for (let i = 0; i < DIM; i++) ss += acc[i] * acc[i];
+  const n = Math.sqrt(ss) || 1; for (let i = 0; i < DIM; i++) acc[i] /= n;
+  return { v: acc, contrast: base.contrast };
+}
+
+export async function buildFingerprints(printings, imgUrl, needImages, { cacheFile, imgDir, concurrency = 6, delayMs = 0, refBlur = 0, weights = null, weightsId = '', aug = 0 }) {
   const cachePath = cacheFile;
   const IMG_CACHE = imgDir;
-  const keyOf = src => (refBlur > 0 ? `${src.key}|blur${refBlur}` : src.key); // re-fingerprint when the blur setting changes
+  const tag = [refBlur > 0 && `blur${refBlur}`, weightsId && `w${weightsId}`, aug && `aug${aug}`].filter(Boolean).join('|');
+  const keyOf = src => (tag ? `${src.key}|${tag}` : src.key); // re-fingerprint when a setting changes
   const cache = await readJSON(cachePath, {});
   await fs.mkdir(IMG_CACHE, { recursive: true });
   let downloaded = 0, failed = [];
@@ -75,8 +93,7 @@ export async function buildFingerprints(printings, imgUrl, needImages, { cacheFi
       if (existsSync(imgFile)) png = await fs.readFile(imgFile);
       else { png = await refImage(await getBuffer(src.url)); await fs.writeFile(imgFile, png); downloaded++; if (delayMs) await sleep(delayMs); }
       if (!cached) {
-        const { data, w, h } = await rawRGBA(refBlur > 0 ? await sharp(png).blur(refBlur).png().toBuffer() : png);
-        const { v, contrast } = fingerprint(integral(data, w, h), { x: 0, y: 0, w, h });
+        const { v, contrast } = await refFingerprint(png, { refBlur, weights, aug });
         const { q, scale } = quantize(v);
         cache[p.id] = { k: keyOf(src), q: Buffer.from(q.buffer).toString('base64'), s: scale, c: +contrast.toFixed(1) };
       }
@@ -179,9 +196,9 @@ export async function makeShots(list, images, rounds) {
   return shots;
 }
 
-export async function selfTest(index, images, rounds, { lambda = 0, shots = null, quiet = false } = {}) {
+export async function selfTest(index, images, rounds, { lambda = 0, shots = null, quiet = false, weights = null, topK = 24 } = {}) {
   const { list, refs, scales, groups, mean, hub } = index;
-  const m = new Matcher(refs, scales, groups, mean, { hub, lambda });
+  const m = new Matcher(refs, scales, groups, mean, { hub, lambda, weights, topK });
   const R = rng(12345);
   const pos = new Map(list.map((p, i) => [p.id, i]));
   const correctTop = [], margins = [], wrongTop = [], otherCard = [], fails = [];
@@ -221,7 +238,7 @@ export async function selfTest(index, images, rounds, { lambda = 0, shots = null
     otherCard: { p50: pct(otherCard, 0.5), p99: pct(otherCard, 0.99), p995: pct(otherCard, 0.995), max: pct(otherCard, 1) },
     wouldAdd: { correct: correctTop.filter(s => s >= accept).length, wrongCard: 0 },
     margin: { p15: pct(margins, 0.15), p50: pct(margins, 0.5) },
-    thresholds: { accept: +accept.toFixed(3), margin: +margin.toFixed(3), release: +(accept * 0.8).toFixed(3), lambda },
+    thresholds: { accept: +accept.toFixed(3), margin: +margin.toFixed(3), release: +(accept * 0.8).toFixed(3), lambda, topK },
     fails: fails.slice(0, 40),
   };
   // what the scanner would actually do with these thresholds
@@ -239,33 +256,33 @@ export async function writeIndex(dir, index, st, refId = p => p.id) {
     dim: DIM, gw: GW, gh: GH, n: index.list.length, groups: index.nGroups,
     ids: index.list.map(refId), scales: [...index.scales].map(x => +x.toFixed(4)), group: [...index.groups],
     hub: [...index.hub].map(x => +x.toFixed(4)),
+    weights: index.weights ? [...index.weights].map(x => +x.toFixed(3)) : null,
     mean: [...index.mean].map(x => +x.toFixed(6)),
     thresholds: st ? st.thresholds : { accept: 0.55, margin: 0.05, release: 0.44 },
   }));
 }
 
 /**
- * Tries reference-blur and hub-penalty settings on the same simulated camera shots and prints a table.
- * refs: index entries, images: id -> reference PNG. Returns the best setting by "would add" rate.
+ * Compares recognition settings on the same simulated camera shots and logs a table.
+ * configs: [{ blur, lambda, art, topK, aug }]; artBox: the game's artwork rectangle (card fractions).
  */
-export async function experiment(refs, images, rounds = 2, { blurs = [0, 1, 2], lambdas = [0, 0.25, 0.5, 0.75] } = {}) {
+export async function experiment(refs, images, rounds, configs, artBox) {
   const shots = await makeShots(refs.filter(p => images.has(p.id)), images, rounds);
   const rows = [];
-  for (const blur of blurs) {
+  for (const cfg of configs) {
+    const weights = cfg.art && artBox ? boxWeights(artBox) : null;
     const cache = {};
     for (const p of refs) {
       const png = images.get(p.id); if (!png) continue;
-      const { data, w, h } = await rawRGBA(blur > 0 ? await sharp(png).blur(blur).png().toBuffer() : png);
-      const { v, contrast } = fingerprint(integral(data, w, h), { x: 0, y: 0, w, h });
+      const { v, contrast } = await refFingerprint(png, { refBlur: cfg.blur || 0, weights, aug: cfg.aug || 0 });
       const { q, scale } = quantize(v);
       cache[p.id] = { q: Buffer.from(q.buffer).toString('base64'), s: scale, c: contrast };
     }
     const index = buildIndex(refs, cache);
-    for (const lambda of lambdas) {
-      const st = await selfTest(index, images, rounds, { lambda, shots, quiet: true });
-      rows.push({ blur, lambda, accuracy: st.accuracy, wouldAdd: st.recall, correctP5: +(st.correctTop.p5 ?? 0).toFixed(3), otherP995: +(st.otherCard.p995 ?? 0).toFixed(3), accept: st.thresholds.accept });
-      log(`experiment blur=${blur} lambda=${lambda}: accuracy ${(100 * st.accuracy).toFixed(1)}%  would-add ${(100 * st.recall).toFixed(1)}%  correct-p5 ${rows.at(-1).correctP5}  other-p99.5 ${rows.at(-1).otherP995}  accept ${st.thresholds.accept}`);
-    }
+    const st = await selfTest(index, images, rounds, { lambda: cfg.lambda || 0, shots, quiet: true, weights, topK: cfg.topK || 24 });
+    const row = { ...cfg, accuracy: st.accuracy, wouldAdd: st.recall, accept: st.thresholds.accept };
+    rows.push(row);
+    log(`experiment ${JSON.stringify(cfg)}: accuracy ${(100 * st.accuracy).toFixed(1)}%  would-add ${(100 * st.recall).toFixed(1)}%  accept ${st.thresholds.accept}`);
   }
   rows.sort((a, b) => b.wouldAdd - a.wouldAdd || b.accuracy - a.accuracy);
   log('experiment best: ' + JSON.stringify(rows[0]));

@@ -12,7 +12,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DIM, GW, GH } from '../lib/fp.js';
-import { setFixture, getJSON, readJSON, log, buildFingerprints, buildIndex, selfTest, writeIndex, experiment } from './shared.mjs';
+import { setFixture, getJSON, readJSON, log, buildFingerprints, buildIndex, selfTest, writeIndex, experiment, boxWeights } from './shared.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA = path.join(ROOT, 'data');
@@ -24,6 +24,10 @@ const SELFTEST_ROUNDS = ARGS.has('--no-selftest') ? 0 : Number(process.env.SELFT
 // recognition tuning (see EXPERIMENT): blur references like a camera would; penalise "magnet" cards
 const REF_BLUR = Number(process.env.CP_REF_BLUR ?? 0);
 const HUB_LAMBDA = Number(process.env.CP_HUB_LAMBDA ?? 0);
+const ART_FOCUS = process.env.CP_ART === '1';            // weight the artwork box more than frame/text
+const TOPK = Number(process.env.CP_TOPK ?? 24);           // candidate cards compared in detail
+const AUG = Number(process.env.CP_AUG ?? 0);             // simulated camera shots averaged into each reference
+const ART_BOX = { x0: 0.03, x1: 0.97, y0: 0.0, y1: 0.62 };
 const EXPERIMENT = !!process.env.EXPERIMENT;
 
 const API = 'https://api.netdeck.gg/api/cards/cyberpunk';
@@ -196,11 +200,21 @@ async function main() {
   try { cm = await loadCardmarket(cards, printings); }
   catch (e) { log('Cardmarket download failed, keeping previous prices:', e.message); }
 
-  const fp = await buildFingerprints(printings, imgUrl, SELFTEST_ROUNDS > 0 || EXPERIMENT, { cacheFile: path.join(CACHE_DIR, 'fp-cache.json'), imgDir: IMG_CACHE, refBlur: REF_BLUR });
+  const fp = await buildFingerprints(printings, imgUrl, SELFTEST_ROUNDS > 0 || EXPERIMENT, { cacheFile: path.join(CACHE_DIR, 'fp-cache.json'), imgDir: IMG_CACHE, refBlur: REF_BLUR,
+    weights: ART_FOCUS ? boxWeights(ART_BOX) : null, weightsId: ART_FOCUS ? 'art' : '', aug: AUG });
   const index = buildIndex(printings, fp.cache);
+  index.weights = ART_FOCUS ? boxWeights(ART_BOX) : null;
   const prevMeta = await readJSON(path.join(DATA, 'meta.json'), {});
-  const st = SELFTEST_ROUNDS > 0 ? await selfTest(index, fp.images, SELFTEST_ROUNDS, { lambda: HUB_LAMBDA }) : prevMeta.selftest || null;
-  const exp = EXPERIMENT ? await experiment(printings.filter(p => fp.images.has(p.id)), fp.images, 2) : null;
+  const st = SELFTEST_ROUNDS > 0 ? await selfTest(index, fp.images, SELFTEST_ROUNDS, { lambda: HUB_LAMBDA, weights: index.weights, topK: TOPK }) : prevMeta.selftest || null;
+  const exp = EXPERIMENT ? await experiment(printings.filter(p => fp.images.has(p.id)), fp.images, 2, [
+    { blur: 2, lambda: 0.25 },
+    { blur: 2, lambda: 0.25, topK: 64 },
+    { blur: 2, lambda: 0.25, art: true },
+    { blur: 2, lambda: 0.25, art: true, topK: 64 },
+    { blur: 1, lambda: 0.25, aug: 3 },
+    { blur: 1, lambda: 0.25, aug: 3, topK: 64 },
+    { blur: 1, lambda: 0.25, aug: 3, art: true, topK: 64 },
+  ], ART_BOX) : null;
 
   const setOrder = Object.keys(sets).sort((a, b) => {
     const ia = SET_PRIORITY.indexOf(a), ib = SET_PRIORITY.indexOf(b);
@@ -215,7 +229,7 @@ async function main() {
     builtAt: new Date().toISOString(), seconds: Math.round((Date.now() - t0) / 1000),
     cards: cards.length, printings: printings.length, fingerprints: index.list.length, artGroups: index.nGroups,
     imageFailures: fp.failed.slice(0, 20), lowContrastSkipped: index.lowContrast, cardmarket: cm ? cm.report : prevMeta.cardmarket || null, selftest: st,
-    tuning: { refBlur: REF_BLUR, hubLambda: HUB_LAMBDA }, experiment: exp,
+    tuning: { refBlur: REF_BLUR, hubLambda: HUB_LAMBDA, artFocus: ART_FOCUS, topK: TOPK, aug: AUG }, experiment: exp,
   }, null, 1));
   log(`done in ${Math.round((Date.now() - t0) / 1000)}s`);
   if (cm && cm.report.checks.some(c => !c.ok)) log('WARNING: a Cardmarket version check failed; see data/meta.json');

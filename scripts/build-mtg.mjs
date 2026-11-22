@@ -11,7 +11,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setFixture, setLogPrefix, getJSON, readJSON, log, sleep, buildFingerprints, buildIndex, selfTest, writeIndex, experiment } from './shared.mjs';
+import { setFixture, setLogPrefix, getJSON, readJSON, log, sleep, buildFingerprints, buildIndex, selfTest, writeIndex, experiment, boxWeights } from './shared.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'data', 'mtg');
@@ -19,8 +19,12 @@ const CACHE_DIR = path.join(ROOT, '.cache');
 const FIXTURE = process.env.DECKSCAN_MTG_FIXTURE || null;
 const SELFTEST_ROUNDS = process.argv.includes('--no-selftest') ? 0 : Number(process.env.SELFTEST_ROUNDS || 2);
 // recognition tuning (see EXPERIMENT): blur references like a camera would; penalise "magnet" cards
-const REF_BLUR = Number(process.env.MTG_REF_BLUR ?? 0);
-const HUB_LAMBDA = Number(process.env.MTG_HUB_LAMBDA ?? 0);
+const REF_BLUR = Number(process.env.MTG_REF_BLUR ?? 2);
+const HUB_LAMBDA = Number(process.env.MTG_HUB_LAMBDA ?? 0.25);
+const ART_FOCUS = process.env.MTG_ART === '1';            // weight the artwork box more than frame/text
+const TOPK = Number(process.env.MTG_TOPK ?? 24);           // candidate cards compared in detail
+const AUG = Number(process.env.MTG_AUG ?? 0);             // simulated camera shots averaged into each reference
+const ART_BOX = { x0: 0.07, x1: 0.93, y0: 0.1, y1: 0.57 };
 const EXPERIMENT = !!process.env.EXPERIMENT;
 setFixture(FIXTURE);
 setLogPrefix('[mtg]');
@@ -155,11 +159,21 @@ async function main() {
   const pr = await loadPrices(printings);
   const fp = await buildFingerprints(refs, imgUrl, SELFTEST_ROUNDS > 0 || EXPERIMENT, {
     cacheFile: path.join(CACHE_DIR, 'mtg-fp-cache.json'), imgDir: path.join(CACHE_DIR, 'mtg-img'), concurrency: 4, delayMs: 60, refBlur: REF_BLUR,
+    weights: ART_FOCUS ? boxWeights(ART_BOX) : null, weightsId: ART_FOCUS ? 'art' : '', aug: AUG,
   });
   const index = buildIndex(refs, fp.cache);
+  index.weights = ART_FOCUS ? boxWeights(ART_BOX) : null;
   const prevMeta = await readJSON(path.join(OUT, 'meta.json'), {});
-  const st = SELFTEST_ROUNDS > 0 ? await selfTest(index, fp.images, SELFTEST_ROUNDS, { lambda: HUB_LAMBDA }) : prevMeta.selftest || null;
-  const exp = EXPERIMENT ? await experiment(refs, fp.images, 2) : null;
+  const st = SELFTEST_ROUNDS > 0 ? await selfTest(index, fp.images, SELFTEST_ROUNDS, { lambda: HUB_LAMBDA, weights: index.weights, topK: TOPK }) : prevMeta.selftest || null;
+  const exp = EXPERIMENT ? await experiment(refs, fp.images, 2, [
+    { blur: 2, lambda: 0.25 },
+    { blur: 2, lambda: 0.25, topK: 64 },
+    { blur: 2, lambda: 0.25, art: true },
+    { blur: 2, lambda: 0.25, art: true, topK: 64 },
+    { blur: 1, lambda: 0.25, aug: 3 },
+    { blur: 1, lambda: 0.25, aug: 3, topK: 64 },
+    { blur: 1, lambda: 0.25, aug: 3, art: true, topK: 64 },
+  ], ART_BOX) : null;
 
   // the app doesn't need these per-printing helper fields
   const slim = printings.map(({ eur, eurf, cm, ...p }) => p);
@@ -171,7 +185,7 @@ async function main() {
     builtAt: new Date().toISOString(), seconds: Math.round((Date.now() - t0) / 1000),
     cards: cards.length, printings: printings.length, scanReferences: index.list.length, artGroups: index.nGroups,
     imageFailures: fp.failed.slice(0, 20), lowContrastSkipped: index.lowContrast, prices: pr.report, selftest: st,
-    tuning: { refBlur: REF_BLUR, hubLambda: HUB_LAMBDA }, experiment: exp,
+    tuning: { refBlur: REF_BLUR, hubLambda: HUB_LAMBDA, artFocus: ART_FOCUS, topK: TOPK, aug: AUG }, experiment: exp,
   }, null, 1));
   log(`done in ${Math.round((Date.now() - t0) / 1000)}s`);
 }
