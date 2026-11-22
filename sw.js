@@ -1,6 +1,6 @@
-// Offline support: app files are cached (refreshed in the background); data files are
-// network-first so prices stay current, falling back to the cached copy offline.
-const CACHE = 'deckscan-v1';
+// Offline support: everything is network-first (always the newest app and prices when online),
+// falling back to the cached copy offline. 'no-cache' revalidates with GitHub instead of using a stale browser copy.
+const CACHE = 'deckscan-v2';
 const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/data.js', 'js/store.js', 'js/sync.js', 'js/config.js',
   'js/scanner.js', 'js/decks.js', 'lib/fp.js', 'vendor/ui.mjs', 'manifest.webmanifest', 'icons/icon-192.png'];
 
@@ -13,19 +13,9 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return; // card API, images, Firebase: straight to network
-  const key = url.pathname + (url.pathname.includes('/data/') ? '' : url.search);
-  if (url.pathname.includes('/data/')) {
-    e.respondWith(fetch(e.request).then(r => {
-      if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(key, copy)); }
-      return r;
-    }).catch(() => caches.match(key)));
-    return;
-  }
-  e.respondWith(caches.match(e.request).then(hit => {
-    const net = fetch(e.request).then(r => {
-      if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }
-      return r;
-    }).catch(() => hit);
-    return hit || net;
-  }));
+  const key = url.pathname.includes('/data/') ? url.pathname : e.request;
+  e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(r => {
+    if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(key, copy)); }
+    return r;
+  }).catch(() => caches.match(key).then(hit => hit || caches.match('index.html'))));
 });
