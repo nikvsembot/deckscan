@@ -6,7 +6,7 @@ import {
 import { store } from './store.js';
 import { sync, initSync, signIn, signOutUser } from './sync.js';
 import { Scanner } from './scanner.js';
-import { checkDeck, ownedByCard, deckNeeds, MTG_FORMATS, copyLimit, deckGame } from './decks.js';
+import { checkDeck, ownedByCard, deckNeeds, MTG_FORMATS, isCommanderCard, copyLimit, deckGame } from './decks.js';
 
 // ---------------------------------------------------------------- helpers
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -507,6 +507,11 @@ function DeckEditor({ deck, onBack }) {
       <button class="icon-btn" aria-label="Delete deck" onClick=${() => setDel(true)}><${Icon} name="x" /></button></div>
     ${isMtg && html`<label class="field">Format
       <select class="select" value=${deck.format || 'limited'} onChange=${e => save({ format: e.target.value })}>${Object.entries(MTG_FORMATS).map(([k, f]) => html`<option value=${k}>${f.name}</option>`)}</select></label>`}
+    ${isMtg && MTG_FORMATS[deck.format || 'limited'].commander && html`<label class="field">Commander
+      <select class="select" value=${deck.commander || ''} onChange=${e => save({ commander: e.target.value || null })}>
+        <option value="">Choose…</option>
+        ${Object.keys(deck.main || {}).map(id => db.cardById.get(id)).filter(isCommanderCard).map(c => html`<option value=${c.id}>${c.n}</option>`)}
+      </select></label>`}
 
     <div class="checks">
       ${chk.checks.map(x => html`<div class=${cx('check', x.ok ? 'ok' : 'bad')}><${Icon} name=${x.ok ? 'check' : 'x'} size="14" /> ${x.text}</div>`)}

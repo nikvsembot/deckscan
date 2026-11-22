@@ -12,7 +12,9 @@ import { db, cheapest } from './data.js';
 export const MTG_FORMATS = {
   limited: { name: 'Limited (40+ cards)', min: 40, copies: null },
   constructed: { name: 'Constructed (60+ cards)', min: 60, copies: 4 },
+  commander: { name: 'Commander (100 cards)', min: 100, max: 100, copies: 1, commander: true },
 };
+export const isCommanderCard = c => /Legendary/.test(c?.tl || '') && /Creature/.test(c?.tl || '');
 export const deckGame = deck => deck.game || 'cyberpunk';
 export const copyLimit = (deck, card) => {
   if (deckGame(deck) !== 'mtg') return 3;
@@ -59,12 +61,22 @@ function checkMtg(deck) {
   const colors = [...new Set(main.flatMap(x => x.c.ci || []))];
   const NAMES = { W: 'White', U: 'Blue', B: 'Black', R: 'Red', G: 'Green' };
   const checks = [
-    { ok: mainCount >= f.min, text: `${mainCount} cards (${f.name.toLowerCase().replace(/ \(.*/, '')} needs at least ${f.min})` },
+    f.max
+      ? { ok: mainCount === f.max, text: `${mainCount} cards (${f.name.toLowerCase().replace(/ \(.*/, '')} needs exactly ${f.max}, commander included)` }
+      : { ok: mainCount >= f.min, text: `${mainCount} cards (${f.name.toLowerCase().replace(/ \(.*/, '')} needs at least ${f.min})` },
     f.copies
       ? { ok: over.length === 0, text: over.length ? `More than ${f.copies} copies: ${over.map(x => x.c.n).join(', ')}` : `Max ${f.copies} copies of each card (basic lands unlimited)` }
       : { ok: true, text: 'Any number of copies of cards you opened' },
-    { ok: true, text: `${lands} lands${mainCount ? ` (${Math.round((100 * lands) / mainCount)}% — about 40% is typical)` : ''}` },
+    { ok: true, text: `${lands} lands${mainCount ? ` (${Math.round((100 * lands) / mainCount)}% — about ${f.commander ? '37' : '40'}% is typical)` : ''}` },
   ];
+  if (f.commander) {
+    const cmd = deck.commander && deck.main?.[deck.commander] ? db.cardById.get(deck.commander) : null;
+    const ci = new Set(cmd?.ci || []);
+    const outside = cmd ? main.filter(x => (x.c.ci || []).some(k => !ci.has(k))) : [];
+    checks.push(cmd
+      ? { ok: outside.length === 0, text: outside.length ? `Outside ${cmd.n}'s colours: ${outside.map(x => x.c.n).join(', ')}` : `Commander: ${cmd.n} — all cards fit its colours` }
+      : { ok: false, text: 'Pick a commander (a legendary creature in the deck)' });
+  }
   const problems = checks.filter(c => !c.ok).length;
   const ramText = colors.length ? 'Colours: ' + colors.map(c => NAMES[c] || c).join(' · ') : '';
   return { checks, legal: problems === 0, problems, mainCount, fits: () => true, ram: {}, ramText };

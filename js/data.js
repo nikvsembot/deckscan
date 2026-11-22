@@ -84,7 +84,7 @@ export const cardOf = pid => db.cardById.get(db.prById.get(pid)?.c);
 export const gameOf = pid => cardOf(pid)?.game || 'cyberpunk';
 export const fullName = c => (c ? (c.s ? `${c.n} — ${c.s}` : c.n) : '?');
 export const setName = code => db.sets[code]?.name || code;
-const MTG_SHORT = { sos: 'SOS', soa: 'Archive', spg: 'Guest', psos: 'Promo' };
+const MTG_SHORT = { sos: 'SOS', soa: 'Archive', spg: 'Guest', psos: 'Promo', '40k': '40K' };
 export function setShort(code) {
   if (MTG_SHORT[code]) return MTG_SHORT[code];
   const n = setName(code);

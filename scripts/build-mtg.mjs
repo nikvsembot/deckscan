@@ -38,9 +38,10 @@ const SETS = [
   ['e:soa', 'soa'],
   ['e:spg', 'spg'],
   ['e:psos', 'psos'],
+  ['e:40k', '40k'],          // Warhammer 40,000 Commander decks (regular + Collector's Edition surge foils)
 ];
-const SET_NAMES = { sos: 'Secrets of Strixhaven', soa: 'Mystical Archive', spg: 'Special Guests', psos: 'SOS Promos' };
-const SET_ORDER = ['sos', 'soa', 'spg', 'psos'];
+const SET_NAMES = { sos: 'Secrets of Strixhaven', soa: 'Mystical Archive', spg: 'Special Guests', psos: 'SOS Promos', '40k': 'Warhammer 40,000 Commander' };
+const SET_ORDER = ['sos', 'soa', 'spg', 'psos', '40k'];
 
 const COLOR = { W: 'White', U: 'Blue', B: 'Black', R: 'Red', G: 'Green' };
 const TYPES = ['Creature', 'Planeswalker', 'Battle', 'Instant', 'Sorcery', 'Artifact', 'Enchantment', 'Land'];
@@ -75,6 +76,7 @@ function variantLabel(c) {
   if (pt.includes('bundle')) return 'Bundle promo';
   if (pt.includes('prerelease')) return 'Prerelease';
   if (pt.includes('serialized')) return 'Serialized';
+  if (pt.includes('surgefoil')) return 'Surge foil';
   if (c.border_color === 'borderless') return 'Borderless';
   if (fx.includes('extendedart')) return 'Extended art';
   if (fx.includes('showcase')) return 'Showcase';
