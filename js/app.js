@@ -8,6 +8,7 @@ import { store } from './store.js';
 import { sync, initSync, signIn, signOutUser } from './sync.js';
 import { Scanner } from './scanner.js';
 import { checkDeck, ownedByCard, deckNeeds, MTG_FORMATS, isCommanderCard, copyLimit, deckGame } from './decks.js';
+import { exportText, parseDeck, deckText } from './share.js';
 
 // ---------------------------------------------------------------- helpers
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -59,6 +60,7 @@ const Icon = ({ name, size = 22 }) => {
     x: 'M6 6l12 12M18 6L6 18',
     search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM21 21l-5-5',
     ext: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
+    copy: 'M9 9h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1zM5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1',
     check: 'M5 12l5 5L20 7',
     prices: 'M3 20h18M5 16l4-5 4 3 6-8M15 6h4v4',
     star: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z',
@@ -414,6 +416,7 @@ function LibraryView() {
   const [q, setQ] = useState('');
   const [colors, setColors] = useState([]);
   const [types, setTypes] = useState([]);
+  const [share, setShare] = useState(false);
   const [owned, setOwned] = useState(true);
   const [sort, setSort] = useState('value');
   const [setF, setSetF] = useState('');
@@ -451,6 +454,8 @@ function LibraryView() {
       <div><div class="label">${GAMES[game].name} collection value</div><div class="total">${eur(totals.v)}</div></div>
       <div class="right small muted">${totals.n} cards<br />${totals.u} different<br />prices ${pricesDate(game)}</div>
     </div>
+    <button class="btn ask-claude" onClick=${() => setShare(true)}><${Icon} name="copy" size="16" /> Copy for Claude — ask for deck advice</button>
+    ${share && html`<${CopySheet} title="Ask Claude for deck advice" text=${exportText(game, s.coll, s.decks)} onClose=${() => setShare(false)} />`}
     <input class="input" type="search" placeholder="Search cards, tags…" value=${q} onInput=${e => setQ(e.target.value)} />
     <${ChipToggle} options=${GAME_COLORS[game]} value=${colors} onChange=${setColors} render=${c => html`<${Dot} color=${c} /> ${c}`} />
     <${ChipToggle} options=${GAME_TYPES[game]} value=${types} onChange=${setTypes} />
@@ -487,9 +492,51 @@ function LibraryView() {
 }
 
 // ---------------------------------------------------------------- DECKS
+// ---------------------------------------------------------------- Claude advisor: copy out, import back
+function CopySheet({ title, text, onClose }) {
+  const ref = useRef();
+  const [done, setDone] = useState(false);
+  const copy = () => {
+    const ok = () => setDone(true);
+    (navigator.clipboard?.writeText(text) || Promise.reject()).then(ok, () => { ref.current?.select(); document.execCommand?.('copy') && ok(); });
+  };
+  return html`<${Sheet} title=${title} onClose=${onClose}>
+    <p class="small muted">Paste this into your Claude chat (the TCG project) and ask for advice — e.g. "build me a deck from my cards" or "which cards should I buy next?". Claude answers with a deck list you can bring back with <b>Decks → Import deck</b>.</p>
+    <div class="row gap"><button class="btn primary grow" onClick=${copy}><${Icon} name=${done ? 'check' : 'copy'} size="18" /> ${done ? 'Copied' : 'Copy'}</button>
+      <a class="btn grow" href="https://claude.ai/new" target="_blank" rel="noopener">Open Claude <${Icon} name="ext" size="14" /></a></div>
+    <textarea ref=${ref} class="input share-text" readonly value=${text} onFocus=${e => e.target.select()} />
+    <p class="small muted">${text.length.toLocaleString('en')} characters</p>
+  <//>`;
+}
+
+function ImportDeck({ game, onDone, onClose }) {
+  const [text, setText] = useState('');
+  const [name, setName] = useState('');
+  const parsed = useMemo(() => (text.trim() ? parseDeck(text, game) : null), [text, game]);
+  const count = parsed ? Object.values(parsed.main).reduce((a, n) => a + n, 0) : 0;
+  const save = () => {
+    const format = game !== 'mtg' ? undefined : parsed.commander || count === 100 ? 'commander' : count >= 60 ? 'constructed' : 'limited';
+    const d = { id: uid(), game, name: name.trim() || parsed.name || 'Imported deck', legends: parsed.legends, main: parsed.main,
+      created: Date.now(), ...(game === 'mtg' ? { format, commander: parsed.commander } : {}) };
+    store.saveDeck(d);
+    onDone(d.id);
+  };
+  return html`<${Sheet} title=${`Import a ${GAMES[game].name} deck`} onClose=${onClose}>
+    <p class="small muted">Paste a deck list, e.g. from Claude: one card per line like <b>3 Card Name</b>${game === 'cyberpunk' ? ', Legends under a "Legends:" line' : ', commander as "Commander: Name"'}.</p>
+    <input class="input" placeholder=${parsed?.name || 'Deck name'} value=${name} onInput=${e => setName(e.target.value)} />
+    <textarea class="input share-text" placeholder=${'3 Card Name\n2 Another Card'} value=${text} onInput=${e => setText(e.target.value)} />
+    ${parsed && html`<div class="checks">
+      <div class=${cx('check', count ? 'ok' : 'bad')}><${Icon} name=${count ? 'check' : 'x'} size="14" /> ${count} cards found${game === 'cyberpunk' ? ` + ${parsed.legends.length} Legends` : parsed.commander ? ` · commander ${db.cardById.get(parsed.commander)?.n}` : ''}</div>
+      ${parsed.unknown.length > 0 && html`<div class="check bad"><${Icon} name="x" size="14" /> Not recognised (${parsed.unknown.length}): ${parsed.unknown.slice(0, 12).join(' · ')}${parsed.unknown.length > 12 ? ' …' : ''}</div>`}
+    </div>`}
+    <button class="btn primary" disabled=${!count && !parsed?.legends.length} onClick=${save}>Save deck</button>
+  <//>`;
+}
+
 function DecksView() {
   const s = useStore();
   const [edit, setEdit] = useState(null);
+  const [sheet, setSheet] = useState(null);
   const game = useGame(s);
   const decks = Object.values(s.decks).filter(d => deckGame(d) === game).sort((a, b) => (b.updated || 0) - (a.updated || 0));
   if (edit && s.decks[edit]) return html`<${DeckEditor} deck=${s.decks[edit]} onBack=${() => setEdit(null)} />`;
@@ -500,6 +547,9 @@ function DecksView() {
   return html`<div class="page">
     <${GameSwitch} value=${game} onChange=${setGame} />
     <div class="row"><h2 class="grow">${GAMES[game].name} decks</h2><button class="btn primary" onClick=${create}><${Icon} name="plus" size="18" /> New deck</button></div>
+    <div class="row gap"><button class="btn grow" onClick=${() => setSheet('import')}>Import deck</button><button class="btn grow" onClick=${() => setSheet('copy')}>Copy for Claude</button></div>
+    ${sheet === 'import' && html`<${ImportDeck} game=${game} onClose=${() => setSheet(null)} onDone=${id => { setSheet(null); setEdit(id); }} />`}
+    ${sheet === 'copy' && html`<${CopySheet} title="Ask Claude for deck advice" text=${exportText(game, s.coll, s.decks)} onClose=${() => setSheet(null)} />`}
     ${!decks.length && html`<p class="muted">Build decks from your library. The app checks the deck rules, shows which cards you own, and adds up what the missing cards cost on Cardmarket.</p>`}
     <div class="list">${decks.map(d => {
       const chk = checkDeck(d), need = deckNeeds(d, s.coll);
@@ -523,6 +573,7 @@ function DeckEditor({ deck, onBack }) {
   const [ownedOnly, setOwnedOnly] = useState(false);
   const [view, setView] = useState('deck');
   const [del, setDel] = useState(false);
+  const [share, setShare] = useState(false);
   const [open, setOpen] = useState(null);
   const game = deckGame(deck), isMtg = game === 'mtg';
   const types = GAME_TYPES[game];
@@ -563,7 +614,9 @@ function DeckEditor({ deck, onBack }) {
   return html`<div class="page">
     <div class="row gap"><button class="btn small" onClick=${onBack}>‹ Decks</button>
       <input class="input grow" value=${deck.name} onChange=${e => save({ name: e.target.value || 'Deck' })} aria-label="Deck name" />
+      <button class="icon-btn" aria-label="Copy deck list" onClick=${() => setShare(true)}><${Icon} name="copy" /></button>
       <button class="icon-btn" aria-label="Delete deck" onClick=${() => setDel(true)}><${Icon} name="x" /></button></div>
+    ${share && html`<${CopySheet} title=${`Deck list — ${deck.name}`} text=${deckText(deck)} onClose=${() => setShare(false)} />`}
     ${isMtg && html`<label class="field">Format
       <select class="select" value=${deck.format || 'limited'} onChange=${e => save({ format: e.target.value })}>${Object.entries(MTG_FORMATS).map(([k, f]) => html`<option value=${k}>${f.name}</option>`)}</select></label>`}
     ${isMtg && MTG_FORMATS[deck.format || 'limited'].commander && html`<label class="field">Commander
@@ -783,6 +836,18 @@ function App() {
 }
 
 render(html`<${App} />`, document.getElementById('app'));
+// For Claude working in the user's browser: read the collection and save decks through the app itself.
+window.deckscan = {
+  exportText: (game = 'cyberpunk') => exportText(game, store.state.coll, store.state.decks),
+  importDeck(text, game = 'cyberpunk', name = '') {
+    const p = parseDeck(text, game), count = Object.values(p.main).reduce((a, n) => a + n, 0);
+    const d = { id: uid(), game, name: name || p.name || 'Imported deck', legends: p.legends, main: p.main, created: Date.now(),
+      ...(game === 'mtg' ? { format: p.commander || count === 100 ? 'commander' : count >= 60 ? 'constructed' : 'limited', commander: p.commander } : {}) };
+    store.saveDeck(d);
+    return { id: d.id, cards: count, legends: p.legends.length, unknown: p.unknown };
+  },
+};
+
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   const hadController = !!navigator.serviceWorker.controller;
   let reloaded = false;

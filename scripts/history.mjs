@@ -50,5 +50,9 @@ for (const [game, dir] of GAMES) {
 
   const from = Math.max(0, L - KEEP_ON_SITE), cut = o => Object.fromEntries(Object.entries(o).map(([k, a]) => [k, a.slice(from)]));
   await fs.writeFile(path.join(dir, 'history.json'), JSON.stringify({ dates: h.dates.slice(from), n: cut(h.n), f: cut(h.f) }));
+  // Reference copy for the Claude deck advisor (read from the branch): card list, rules text, today's prices.
+  await fs.mkdir(path.join(HIST, 'ref'), { recursive: true });
+  for (const f of ['cards.json', 'cards-text.json', 'prices.json'])
+    await fs.copyFile(path.join(dir, f), path.join(HIST, 'ref', `${game}-${f}`)).catch(() => {});
   console.log(`${game}: ${L} day(s) of prices (${h.dates[0]} … ${h.dates.at(-1)}), ${Object.keys(h.n).length} printings`);
 }

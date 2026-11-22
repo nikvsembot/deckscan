@@ -78,7 +78,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(300)
     page.screenshot(path=f'{OUT}/prices.png', full_page=True)
     n_changes = page.locator('.change-row').count()
-    box = page.locator('.chart svg').bounding_box()
+    box = page.locator('.chart svg').bounding_box() if page.locator('.chart svg').count() else None
     if box:
         page.mouse.move(box['x'] + box['width'] * 0.3, box['y'] + box['height'] / 2)
         page.screenshot(path=f'{OUT}/prices-hover.png')
@@ -92,6 +92,24 @@ with sync_playwright() as p:
         page.screenshot(path=f'{OUT}/card-graph.png', full_page=True)
         page.locator('.sheet [aria-label=Close]').click()
     print('prices: my changes', n_changes, 'vs avg', n_avg, 'all', n_all)
+    # Claude advisor: export text, import a deck through the UI and through window.deckscan
+    exp = page.evaluate("window.deckscan.exportText('cyberpunk')")
+    names = [l.split('— ')[0][2:].strip() for l in exp.splitlines() if l.startswith('# ')]
+    legends = [l[2:].split(' — ')[0] for l in exp.splitlines() if l.startswith('# ') and 'Legend' in l][:3]
+    others = [l[2:].split(' — ')[0] for l in exp.splitlines() if l.startswith('# ') and 'Legend' not in l][:5]
+    deck_list = 'Imported test\nLegends:\n' + '\n'.join('1 ' + n for n in legends) + '\nMain:\n' + '\n'.join(f'3x {n}' for n in others) + '\n2 Not A Real Card'
+    page.get_by_role('button', name='Decks').click()
+    page.get_by_role('button', name='Import deck').click()
+    page.locator('.sheet textarea').fill(deck_list)
+    found = page.locator('.sheet .checks').inner_text()
+    page.screenshot(path=f'{OUT}/import.png')
+    page.get_by_role('button', name='Save deck').click()
+    page.wait_for_selector('.checks')
+    imported_checks = page.locator('.checks').first.inner_text()
+    page.screenshot(path=f'{OUT}/imported-deck.png', full_page=True)
+    api = page.evaluate("window.deckscan.importDeck('Commander: Nobody\\n4 Also Nobody', 'cyberpunk', 'api test')")
+    print('export chars', len(exp), '| import preview:', found.replace('\n', ' / '), '| api:', api)
+    print('imported deck checks:', imported_checks.replace('\n', ' / ')[:300])
     page.get_by_role('button', name='Settings').click()
     page.wait_for_selector('.settings')
     page.screenshot(path=f'{OUT}/settings.png', full_page=True)

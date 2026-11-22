@@ -96,7 +96,7 @@ async function loadCards() {
     log(`${q}: ${list.length} printings`);
     raw.push(...list.map(c => ({ c, label })));
   }
-  const cards = new Map(), printings = [], refs = [], imgUrl = new Map();
+  const cards = new Map(), printings = [], refs = [], imgUrl = new Map(), texts = {};
   for (const { c, label } of raw) {
     const cid = 'mtg:' + (c.oracle_id || face(c).oracle_id || c.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
     if (!cards.has(cid)) {
@@ -108,6 +108,7 @@ async function loadCards() {
         tags: (typeLine.split('—')[1] || '').split('//')[0].trim().split(/\s+/).filter(Boolean),
         basic: /Basic Land/.test(typeLine),
       });
+      texts[cid] = c.oracle_text ?? (c.card_faces || []).map(f => `${f.name}: ${f.oracle_text || ''}`).join('\n// ');
     }
     const front = c.image_uris || c.card_faces?.[0]?.image_uris;
     const back = !c.image_uris && c.card_faces?.[1]?.image_uris;
@@ -123,7 +124,7 @@ async function loadCards() {
   const sets = {};
   for (const p of printings) { sets[p.set] = sets[p.set] || { name: SET_NAMES[p.set] || p.set.toUpperCase(), n: 0 }; sets[p.set].n++; }
   log(`cards ${cards.size}, printings ${printings.length}, scan references ${refs.length}`);
-  return { cards: [...cards.values()], printings, refs, imgUrl, sets };
+  return { cards: [...cards.values()], printings, refs, imgUrl, sets, texts };
 }
 
 async function loadPrices(printings) {
@@ -156,7 +157,7 @@ async function loadPrices(printings) {
 async function main() {
   const t0 = Date.now();
   await fs.mkdir(OUT, { recursive: true });
-  const { cards, printings, refs, imgUrl, sets } = await loadCards();
+  const { cards, printings, refs, imgUrl, sets, texts } = await loadCards();
   if (!printings.length) throw new Error('Scryfall returned no cards');
   const pr = await loadPrices(printings);
   const fp = await buildFingerprints(refs, imgUrl, SELFTEST_ROUNDS > 0 || EXPERIMENT, {
@@ -180,6 +181,7 @@ async function main() {
   // the app doesn't need these per-printing helper fields
   const slim = printings.map(({ eur, eurf, cm, ...p }) => p);
   const setOrder = Object.keys(sets).sort((a, b) => (SET_ORDER.indexOf(a) + 99) % 99 - (SET_ORDER.indexOf(b) + 99) % 99);
+  await fs.writeFile(path.join(OUT, 'cards-text.json'), JSON.stringify(texts));   // rules text, for the Claude deck advisor
   await fs.writeFile(path.join(OUT, 'cards.json'), JSON.stringify({ updatedAt: new Date().toISOString(), source: 'Scryfall', game: 'mtg', sets, setOrder, cards, printings: slim }));
   await fs.writeFile(path.join(OUT, 'prices.json'), JSON.stringify(pr.prices));
   await writeIndex(OUT, index, st, p => p.pid);

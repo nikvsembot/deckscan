@@ -68,8 +68,14 @@ async function loadCards() {
     total = j.total;
     if (!j.items.length) break;
   }
-  const cards = [], printings = [], sets = {}, imgUrl = new Map();
+  const cards = [], printings = [], sets = {}, imgUrl = new Map(), texts = {};
+  // Rules text, for the Claude deck advisor: any text-like string field the API has.
+  const fieldSet = new Set(items.slice(0, 200).flatMap(c => Object.keys(c)));
+  log('card API fields: ' + [...fieldSet].join(', '));
+  const textKeys = [...fieldSet].filter(k => /text|effect|abilit|rule|keyword|flavou?r/i.test(k));
   for (const c of items) {
+    const t = textKeys.map(k => (typeof c[k] === 'string' ? c[k] : Array.isArray(c[k]) ? c[k].map(x => (typeof x === 'string' ? x : x?.text || x?.name || '')).join(' ') : '')).filter(Boolean).join('\n');
+    if (t) texts[c.slug] = t;
     cards.push({
       id: c.slug, n: c.name, s: c.subname || '', t: c.card_type, c: c.color,
       cost: c.cost ?? null, pw: c.power ?? null, ram: c.ram ?? null,
@@ -85,7 +91,7 @@ async function loadCards() {
   }
   printings.sort((a, b) => a.c.localeCompare(b.c) || a.set.localeCompare(b.set) || collectorKey(a.no) - collectorKey(b.no));
   log(`cards ${cards.length}, English printings ${printings.length}, sets ${Object.keys(sets).length}`);
-  return { cards, printings, sets, imgUrl };
+  return { cards, printings, sets, imgUrl, texts };
 }
 
 // ---------- 2. Cardmarket ----------
@@ -194,7 +200,7 @@ const SET_PRIORITY = ['welcometonightcityretail', 'welcometonightcitybeta', 'the
 async function main() {
   await fs.mkdir(DATA, { recursive: true });
   const t0 = Date.now();
-  const { cards, printings, sets, imgUrl } = await loadCards();
+  const { cards, printings, sets, imgUrl, texts } = await loadCards();
 
   let cm = null;
   try { cm = await loadCardmarket(cards, printings); }
@@ -222,6 +228,7 @@ async function main() {
   });
   const cardsOut = { updatedAt: new Date().toISOString(), source: 'cyberpunktcg.com card database', sets, setOrder, cards, printings };
   await fs.writeFile(path.join(DATA, 'cards.json'), JSON.stringify(cardsOut));
+  await fs.writeFile(path.join(DATA, 'cards-text.json'), JSON.stringify(texts));   // rules text, for the Claude deck advisor
   if (cm) await fs.writeFile(path.join(DATA, 'prices.json'), JSON.stringify(cm.prices));
   if (cm) await fs.writeFile(path.join(DATA, 'cm-debug.json'), JSON.stringify(cm.debug, null, 1));
   await writeIndex(DATA, index, st);
