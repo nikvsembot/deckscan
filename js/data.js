@@ -17,6 +17,7 @@ export const db = {
   prices: { p: {} },
   games: {},     // game -> { loaded, setOrder, pricesAt }
   matchers: {},  // game -> { matcher, fpIds, thresholds, groupMembers }
+  history: {},   // game -> { dates, n, f } (daily prices in cents) or null
 };
 
 const bust = () => Math.floor(Date.now() / 36e5); // hourly cache-buster; the service worker also refreshes data files
@@ -165,3 +166,95 @@ export async function imageUrl(pid) {
   await inflight.get(card);
   return img.get(pid)?.url || null;
 }
+
+// ---------------------------------------------------------------- price history (one point per day, built by scripts/history.mjs)
+export async function loadHistory(game) {
+  if (db.history[game] !== undefined) return db.history[game];
+  try {
+    const r = await fetch(`${GAMES[game].dir}/history.json`);
+    db.history[game] = r.ok ? await r.json() : null;
+  } catch { db.history[game] = null; }
+  return db.history[game];
+}
+
+/** Daily values (€) of one printing; days without a price take the nearest known day. */
+export function historyOf(h, pid, foil = false) {
+  const n = h?.n[pid];
+  if (!n) return null;
+  const f = foil ? h.f[pid] : null;
+  const out = h.dates.map((_, i) => { const c = f?.[i] ?? n[i]; return c == null ? null : c / 100; });
+  let last = null;
+  for (let i = 0; i < out.length; i++) out[i] == null ? (out[i] = last) : (last = out[i]);
+  for (let i = out.length - 1; i >= 0; i--) out[i] == null ? (out[i] = last) : (last = out[i]);
+  return out.every(x => x == null) ? null : out;
+}
+
+/** Value of the current collection on every day of the history. */
+export function collectionSeries(h, coll, game) {
+  if (!h?.dates.length) return null;
+  const tot = h.dates.map(() => 0);
+  for (const [pid, e] of Object.entries(coll)) {
+    if (gameOf(pid) !== game) continue;
+    for (const [qty, foil] of [[e.n, false], [e.f, true]]) {
+      if (!qty) continue;
+      const s = historyOf(h, pid, foil);
+      if (s) s.forEach((x, i) => { tot[i] += qty * (x || 0); });
+    }
+  }
+  return tot.map(x => Math.round(x * 100) / 100);
+}
+
+/** Index of the day to compare against: the last day at least `days` before the newest one. */
+export function baseIndex(h, days) {
+  const L = h?.dates.length || 0;
+  if (L < 2) return -1;
+  if (!isFinite(days)) return 0;
+  const t = new Date(h.dates[L - 1] + 'T12:00:00Z');
+  t.setUTCDate(t.getUTCDate() - days);
+  const ts = t.toISOString().slice(0, 10);
+  let idx = 0;
+  for (let i = 0; i < L; i++) if (h.dates[i] <= ts) idx = i;
+  return Math.min(idx, L - 2);
+}
+
+/** Cardmarket's 30-day average sale price, for "vs 30-day average". */
+export function avg30(pid, foil = false) {
+  const p = db.prices.p[pid];
+  if (!p) return null;
+  const v = x => (x > 0 ? x : null);
+  return foil ? (v(p[6]) ?? v(p[3])) : (v(p[3]) ?? v(p[6]));
+}
+
+/**
+ * Price changes per printing. period: number of days, Infinity (since the first day) or 'avg' (vs 30-day average).
+ * mine: only owned printings, weighted by copies. Returns rows sorted by the biggest € change first.
+ */
+export function priceChanges({ h, period, mine, coll, game }) {
+  const L = h?.dates.length || 0;
+  const bi = period === 'avg' ? null : baseIndex(h, period);
+  if (period !== 'avg' && bi < 0) return [];
+  const one = (pid, foil) => {
+    if (period === 'avg') return [avg30(pid, foil), price(pid, foil)];
+    const s = historyOf(h, pid, foil);
+    return s ? [s[bi], s[L - 1]] : [null, null];
+  };
+  const rows = [];
+  const pids = mine ? Object.keys(coll).filter(pid => gameOf(pid) === game && db.prById.has(pid))
+    : db.printings.filter(p => gameOf(p.id) === game).map(p => p.id);
+  for (const pid of pids) {
+    const e = mine ? coll[pid] : { n: 1 };
+    let total = 0, from = null, to = null, qty = 0;
+    for (const [q, foil] of [[e.n || 0, false], [e.f || 0, true]]) {
+      if (!q) continue;
+      const [a, b] = one(pid, foil);
+      if (a == null || b == null) continue;
+      total += q * (b - a); qty += q;
+      if (from == null) { from = a; to = b; }
+    }
+    if (from == null || Math.abs(to - from) < (mine ? 0.005 : 0.05)) continue;
+    rows.push({ pid, from, to, d: to - from, pct: from > 0 ? (to - from) / from : null, qty, total: mine ? total : to - from });
+  }
+  return rows.sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
+}
+
+export const shortDate = d => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });

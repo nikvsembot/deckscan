@@ -2,6 +2,7 @@ import { html, render, useState, useEffect, useMemo, useRef, useCallback } from 
 import {
   db, loadData, loadMatcher, cardOf, fullName, setName, setShort, prLabel, price, eur, cmLink, cheapest, pricesDate,
   preferredMember, imageUrl, CM_SEARCH, GAMES, hasGame, gameOf,
+  loadHistory, historyOf, collectionSeries, baseIndex, priceChanges, shortDate,
 } from './data.js';
 import { store } from './store.js';
 import { sync, initSync, signIn, signOutUser } from './sync.js';
@@ -59,6 +60,7 @@ const Icon = ({ name, size = 22 }) => {
     search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM21 21l-5-5',
     ext: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
     check: 'M5 12l5 5L20 7',
+    prices: 'M3 20h18M5 16l4-5 4 3 6-8M15 6h4v4',
     star: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z',
   }[name];
   return html`<svg width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=${p} /></svg>`;
@@ -148,6 +150,62 @@ function ChipToggle({ options, value, onChange, render: r = x => x }) {
 }
 
 // ---------------------------------------------------------------- card detail sheet
+// ---------------------------------------------------------------- price graph
+const signEur = v => (v > 0 ? '+' : v < 0 ? '−' : '') + eur(Math.abs(v));
+const pctText = p => (p == null ? '' : `${p > 0 ? '+' : p < 0 ? '−' : ''}${Math.abs(100 * p).toFixed(Math.abs(p) < 0.1 ? 1 : 0)}%`);
+function Delta({ d, pct }) {
+  const up = d > 0;
+  return html`<span class=${cx('delta', up ? 'up' : d < 0 ? 'down' : '')}>${up ? '▲' : d < 0 ? '▼' : ''} ${signEur(d)}${pct != null ? ` (${pctText(pct)})` : ''}</span>`;
+}
+
+/** One-series line chart with a crosshair readout (touch or hover). */
+function LineChart({ dates, values, label = 'Price' }) {
+  const [hov, setHov] = useState(null);
+  const n = values?.length || 0;
+  if (n < 2) return html`<div class="chart-empty small muted">The graph starts after the next daily price update${dates?.[0] ? ` (history begins ${shortDate(dates[0])})` : ''}.</div>`;
+  const W = 340, H = 150, L = 8, R = 8, T = 10, B = 22;
+  let lo = Math.min(...values), hi = Math.max(...values);
+  const span = hi - lo || Math.max(hi * 0.1, 0.1);
+  lo = Math.max(0, lo - span * 0.12); hi = hi + span * 0.12;
+  const X = i => L + (i / (n - 1)) * (W - L - R);
+  const Y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const pts = values.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  const pick = e => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * W;
+    setHov(Math.max(0, Math.min(n - 1, Math.round(((x - L) / (W - L - R)) * (n - 1)))));
+  };
+  const i = hov ?? n - 1;
+  const grid = [0.25, 0.5, 0.75].map(f => T + f * (H - T - B));
+  return html`<div class="chart">
+    <div class="chart-read"><b>${eur(values[i])}</b> <span class="muted small">${label} · ${shortDate(dates[i])}</span></div>
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label=${`${label} from ${shortDate(dates[0])} to ${shortDate(dates[n - 1])}: ${eur(values[0])} to ${eur(values[n - 1])}`}
+      onPointerMove=${pick} onPointerDown=${pick} onPointerLeave=${() => setHov(null)}>
+      ${grid.map(y => html`<line x1=${L} x2=${W - R} y1=${y} y2=${y} class="grid" />`)}
+      <line x1=${L} x2=${W - R} y1=${H - B} y2=${H - B} class="axis" />
+      <text x=${W - R} y=${T + 9} class="tick" text-anchor="end">${eur(hi)}</text>
+      <text x=${W - R} y=${H - B - 4} class="tick" text-anchor="end">${eur(lo)}</text>
+      <text x=${L} y=${H - 6} class="tick">${shortDate(dates[0])}</text>
+      <text x=${W - R} y=${H - 6} class="tick" text-anchor="end">${shortDate(dates[n - 1])}</text>
+      <polyline points=${pts} class="line" />
+      ${hov != null && html`<line x1=${X(i)} x2=${X(i)} y1=${T} y2=${H - B} class="cross" />`}
+      <circle cx=${X(i)} cy=${Y(values[i])} r="4.5" class="dot" />
+    </svg>
+  </div>`;
+}
+
+function CardPriceGraph({ pid, game }) {
+  const [h, setH] = useState(db.history[game]);
+  const [foil, setFoil] = useState(false);
+  useEffect(() => { let on = true; loadHistory(game).then(x => on && setH(x)); return () => { on = false; }; }, [game]);
+  if (h === undefined) return null;
+  const hasFoil = price(pid, true) != null && price(pid, true) !== price(pid, false);
+  const vals = historyOf(h, pid, foil && hasFoil);
+  return html`<h4>Price history</h4>
+    ${hasFoil && html`<div class="seg small-seg"><button class=${cx(!foil && 'on')} onClick=${() => setFoil(false)}>Normal</button><button class=${cx(foil && 'on')} onClick=${() => setFoil(true)}>Foil</button></div>`}
+    <${LineChart} dates=${h?.dates} values=${vals} label=${foil && hasFoil ? 'Foil trend' : 'Trend'} />`;
+}
+
 function CardSheet({ cardId, focus, onClose }) {
   const s = useStore();
   const c = db.cardById.get(cardId);
@@ -167,6 +225,7 @@ function CardSheet({ cardId, focus, onClose }) {
         <a class="btn small" href=${cmLink(sel)} target="_blank" rel="noopener">Cardmarket <${Icon} name="ext" size="14" /></a>
       </div>
     </div>
+    <${CardPriceGraph} pid=${sel} game=${c.game || 'cyberpunk'} />
     <h4>Versions</h4>
     <div class="list">
       ${prs.map(p => {
@@ -571,6 +630,55 @@ function DeckEditor({ deck, onBack }) {
 }
 
 // ---------------------------------------------------------------- SETTINGS
+// ---------------------------------------------------------------- prices: collection value over time + what changed
+const PERIODS = [[1, 'Day'], [7, 'Week'], [30, 'Month'], [Infinity, 'All'], ['avg', 'vs 30-day avg']];
+function PricesView() {
+  const s = useStore();
+  const game = useGame(s);
+  const [h, setH] = useState(db.history[game]);
+  const [period, setPeriod] = useState(7);
+  const [mine, setMine] = useState(true);
+  const [open, setOpen] = useState(null);
+  const [more, setMore] = useState(60);
+  useEffect(() => { let on = true; setH(db.history[game]); loadHistory(game).then(x => on && setH(x)); return () => { on = false; }; }, [game]);
+  const series = useMemo(() => collectionSeries(h, s.coll, game), [h, s.coll, game]);
+  const rows = useMemo(() => (h === undefined ? [] : priceChanges({ h, period, mine, coll: s.coll, game })), [h, period, mine, s.coll, game]);
+  const L = h?.dates.length || 0;
+  const bi = period === 'avg' ? -1 : baseIndex(h, period);
+  const current = useMemo(() => Object.entries(s.coll).reduce((t, [pid, e]) => gameOf(pid) !== game ? t
+    : t + (e.n || 0) * (price(pid) || 0) + (e.f || 0) * (price(pid, true) || 0), 0), [s.coll, game]);
+  const now = series?.[L - 1] ?? current;
+  const then = period === 'avg' ? (mine ? now - rows.reduce((a, r) => a + r.total, 0) : null) : bi >= 0 ? series?.[bi] : null;
+  const since = period === 'avg' ? "Cardmarket's 30-day average" : bi >= 0 ? shortDate(h.dates[bi]) : null;
+  const up = rows.filter(r => r.total > 0).length, down = rows.filter(r => r.total < 0).length;
+  const noHistory = period !== 'avg' && bi < 0;
+
+  return html`<div class="page">
+    <${GameSwitch} value=${game} onChange=${setGame} />
+    <div class="stat-row">
+      <div><div class="label">${GAMES[game].name} collection value</div><div class="total">${eur(now ?? 0)}</div>
+        ${then != null && now != null && html`<div class="small"><${Delta} d=${now - then} pct=${then > 0 ? (now - then) / then : null} /> <span class="muted">since ${since}</span></div>`}</div>
+      <div class="right small muted">prices ${pricesDate(game)}<br />updated daily</div>
+    </div>
+    ${h === undefined ? html`<div class="spinner" />` : html`<${LineChart} dates=${h?.dates} values=${series} label="Collection value" />`}
+
+    <h4>What changed</h4>
+    <div class="chips">${PERIODS.map(([k, label]) => html`<button class=${cx('chip', period === k && 'on')} onClick=${() => { setPeriod(k); setMore(60); }}>${label}</button>`)}</div>
+    <div class="seg"><button class=${cx(mine && 'on')} onClick=${() => setMine(true)}>My cards</button><button class=${cx(!mine && 'on')} onClick=${() => setMine(false)}>All cards</button></div>
+    ${noHistory ? html`<p class="muted small">Price history started ${L ? shortDate(h.dates[0]) : 'today'}. Day-to-day changes show up after the next daily update (about 15:30 Japan time). Meanwhile, "vs 30-day avg" compares today's prices with Cardmarket's 30-day average.</p>`
+    : html`<p class="small muted">${rows.length ? html`<span class="delta up">▲ ${up} up</span> · <span class="delta down">▼ ${down} down</span> since ${since}${mine ? '' : ' (changes of 5 cents or more)'}` : mine && !Object.keys(s.coll).some(pid => gameOf(pid) === game) ? 'Scan or add cards to see how their prices move.' : `No price changes since ${since}.`}</p>
+      <div class="list">${rows.slice(0, more).map(r => {
+        const pr = db.prById.get(r.pid), c = cardOf(r.pid);
+        return html`<button class="list-row change-row" onClick=${() => setOpen({ card: c.id, pid: r.pid })}>
+          <span class="grow left"><b>${fullName(c)}</b><div class="small muted">${setShort(pr.set)} #${pr.no}${pr.v ? ' · ' + pr.v : ''} · ${eur(r.from)} → ${eur(r.to)}</div></span>
+          <span class="right"><${Delta} d=${r.d} pct=${r.pct} />${mine && r.qty > 1 ? html`<div class="small muted">×${r.qty} = ${signEur(r.total)}</div>` : ''}</span>
+        </button>`;
+      })}</div>
+      ${rows.length > more && html`<button class="btn" onClick=${() => setMore(more + 100)}>Show more (${rows.length - more})</button>`}`}
+    ${open && html`<${CardSheet} cardId=${open.card} focus=${open.pid} onClose=${() => setOpen(null)} />`}
+  </div>`;
+}
+
 function SettingsView({ installEvt }) {
   const s = useStore();
   const sy = useSync();
@@ -637,7 +745,7 @@ function SettingsView({ installEvt }) {
 }
 
 // ---------------------------------------------------------------- shell
-const TABS = [['scan', 'Scan'], ['library', 'Library'], ['decks', 'Decks'], ['settings', 'Settings']];
+const TABS = [['scan', 'Scan'], ['library', 'Library'], ['prices', 'Prices'], ['decks', 'Decks'], ['settings', 'Settings']];
 
 function App() {
   const [ready, setReady] = useState(false);
@@ -665,6 +773,7 @@ function App() {
     <main class=${'tab-' + tab}>
       ${tab === 'scan' && html`<${ScanView} />`}
       ${tab === 'library' && html`<${LibraryView} />`}
+      ${tab === 'prices' && html`<${PricesView} />`}
       ${tab === 'decks' && html`<${DecksView} />`}
       ${tab === 'settings' && html`<${SettingsView} installEvt=${installEvt} />`}
     </main>

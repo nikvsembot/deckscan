@@ -18,7 +18,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write   # to save the daily prices on the price-history branch
   pages: write
   id-token: write
 
@@ -74,6 +74,23 @@ jobs:
         run: |
           cat data/meta.json
           cat data/mtg/meta.json || echo "no Magic data"
+
+      - name: Price history (kept on the price-history branch)
+        continue-on-error: true
+        run: |
+          if git fetch -q --depth=1 origin price-history; then
+            git worktree add -q hist FETCH_HEAD
+          else
+            git worktree add -q --detach hist
+            git -C hist checkout -q --orphan price-history
+            git -C hist rm -rfq .
+          fi
+          node scripts/history.mjs hist
+          cd hist
+          git add -A
+          if git -c user.name="deckscan bot" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -qm "Prices $(date -u +%F)"; then
+            git push -q origin HEAD:refs/heads/price-history
+          fi
 
       - name: Assemble site
         run: |
