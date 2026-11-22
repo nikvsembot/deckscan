@@ -10,6 +10,10 @@ on:
       selftest:
         description: 'Recognition self-test rounds per card (0 = skip)'
         default: '2'
+      experiment:
+        description: 'Also compare recognition settings (slower; results in the log and meta.json)'
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -49,11 +53,13 @@ jobs:
       - name: Build data (cards, Cardmarket prices, scan fingerprints, self-test)
         env:
           SELFTEST_ROUNDS: ${{ github.event.inputs.selftest || '2' }}
+          EXPERIMENT: ${{ github.event.inputs.experiment == 'true' && '1' || '' }}
         run: node scripts/build-data.mjs
 
       - name: Build Magic data (Scryfall cards + Cardmarket Magic prices)
         env:
           SELFTEST_ROUNDS: ${{ github.event.inputs.selftest || '2' }}
+          EXPERIMENT: ${{ github.event.inputs.experiment == 'true' && '1' || '' }}
           NODE_OPTIONS: --max-old-space-size=6144
         # if Scryfall or Cardmarket fails, keep yesterday's Magic data instead of dropping Magic from the app
         run: |

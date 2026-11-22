@@ -11,13 +11,17 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setFixture, setLogPrefix, getJSON, readJSON, log, sleep, buildFingerprints, buildIndex, selfTest, writeIndex } from './shared.mjs';
+import { setFixture, setLogPrefix, getJSON, readJSON, log, sleep, buildFingerprints, buildIndex, selfTest, writeIndex, experiment } from './shared.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'data', 'mtg');
 const CACHE_DIR = path.join(ROOT, '.cache');
 const FIXTURE = process.env.DECKSCAN_MTG_FIXTURE || null;
 const SELFTEST_ROUNDS = process.argv.includes('--no-selftest') ? 0 : Number(process.env.SELFTEST_ROUNDS || 2);
+// recognition tuning (see EXPERIMENT): blur references like a camera would; penalise "magnet" cards
+const REF_BLUR = Number(process.env.MTG_REF_BLUR ?? 0);
+const HUB_LAMBDA = Number(process.env.MTG_HUB_LAMBDA ?? 0);
+const EXPERIMENT = !!process.env.EXPERIMENT;
 setFixture(FIXTURE);
 setLogPrefix('[mtg]');
 
@@ -149,12 +153,13 @@ async function main() {
   const { cards, printings, refs, imgUrl, sets } = await loadCards();
   if (!printings.length) throw new Error('Scryfall returned no cards');
   const pr = await loadPrices(printings);
-  const fp = await buildFingerprints(refs, imgUrl, SELFTEST_ROUNDS > 0, {
-    cacheFile: path.join(CACHE_DIR, 'mtg-fp-cache.json'), imgDir: path.join(CACHE_DIR, 'mtg-img'), concurrency: 4, delayMs: 60,
+  const fp = await buildFingerprints(refs, imgUrl, SELFTEST_ROUNDS > 0 || EXPERIMENT, {
+    cacheFile: path.join(CACHE_DIR, 'mtg-fp-cache.json'), imgDir: path.join(CACHE_DIR, 'mtg-img'), concurrency: 4, delayMs: 60, refBlur: REF_BLUR,
   });
   const index = buildIndex(refs, fp.cache);
   const prevMeta = await readJSON(path.join(OUT, 'meta.json'), {});
-  const st = SELFTEST_ROUNDS > 0 ? await selfTest(index, fp.images, SELFTEST_ROUNDS) : prevMeta.selftest || null;
+  const st = SELFTEST_ROUNDS > 0 ? await selfTest(index, fp.images, SELFTEST_ROUNDS, { lambda: HUB_LAMBDA }) : prevMeta.selftest || null;
+  const exp = EXPERIMENT ? await experiment(refs, fp.images, 2) : null;
 
   // the app doesn't need these per-printing helper fields
   const slim = printings.map(({ eur, eurf, cm, ...p }) => p);
@@ -166,6 +171,7 @@ async function main() {
     builtAt: new Date().toISOString(), seconds: Math.round((Date.now() - t0) / 1000),
     cards: cards.length, printings: printings.length, scanReferences: index.list.length, artGroups: index.nGroups,
     imageFailures: fp.failed.slice(0, 20), lowContrastSkipped: index.lowContrast, prices: pr.report, selftest: st,
+    tuning: { refBlur: REF_BLUR, hubLambda: HUB_LAMBDA }, experiment: exp,
   }, null, 1));
   log(`done in ${Math.round((Date.now() - t0) / 1000)}s`);
 }

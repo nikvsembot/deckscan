@@ -56,9 +56,10 @@ export async function rawRGBA(pngOrJpg) {
 }
 
 /** printings: [{id, c, set, no}] (id = reference id); imgUrl: id -> {url, key}; opts: {cacheFile, imgDir, concurrency, delayMs} */
-export async function buildFingerprints(printings, imgUrl, needImages, { cacheFile, imgDir, concurrency = 6, delayMs = 0 }) {
+export async function buildFingerprints(printings, imgUrl, needImages, { cacheFile, imgDir, concurrency = 6, delayMs = 0, refBlur = 0 }) {
   const cachePath = cacheFile;
   const IMG_CACHE = imgDir;
+  const keyOf = src => (refBlur > 0 ? `${src.key}|blur${refBlur}` : src.key); // re-fingerprint when the blur setting changes
   const cache = await readJSON(cachePath, {});
   await fs.mkdir(IMG_CACHE, { recursive: true });
   let downloaded = 0, failed = [];
@@ -67,17 +68,17 @@ export async function buildFingerprints(printings, imgUrl, needImages, { cacheFi
     const src = imgUrl.get(p.id);
     if (!src) return;
     const imgFile = path.join(IMG_CACHE, `${p.id}.png`);
-    const cached = cache[p.id] && cache[p.id].k === src.key;
+    const cached = cache[p.id] && cache[p.id].k === keyOf(src);
     if (cached && !needImages) return;
     try {
       let png;
-      if (existsSync(imgFile) && cached) png = await fs.readFile(imgFile);
+      if (existsSync(imgFile)) png = await fs.readFile(imgFile);
       else { png = await refImage(await getBuffer(src.url)); await fs.writeFile(imgFile, png); downloaded++; if (delayMs) await sleep(delayMs); }
       if (!cached) {
-        const { data, w, h } = await rawRGBA(png);
+        const { data, w, h } = await rawRGBA(refBlur > 0 ? await sharp(png).blur(refBlur).png().toBuffer() : png);
         const { v, contrast } = fingerprint(integral(data, w, h), { x: 0, y: 0, w, h });
         const { q, scale } = quantize(v);
-        cache[p.id] = { k: src.key, q: Buffer.from(q.buffer).toString('base64'), s: scale, c: +contrast.toFixed(1) };
+        cache[p.id] = { k: keyOf(src), q: Buffer.from(q.buffer).toString('base64'), s: scale, c: +contrast.toFixed(1) };
       }
       if (needImages) images.set(p.id, png);
     } catch (e) { failed.push(`${p.id}: ${e.message}`); }
@@ -120,7 +121,18 @@ export function buildIndex(printings, cache) {
   }
   const gid = new Map(); const groups = new Int32Array(N);
   for (let i = 0; i < N; i++) { const r = find(i); if (!gid.has(r)) gid.set(r, gid.size); groups[i] = gid.get(r); }
-  return { list, refs, scales, groups, nGroups: gid.size, mean, lowContrast };
+  // hubness: mean similarity to the K most similar *other cards* (high = a "magnet" that looks like everything)
+  const K = Math.min(10, Math.max(1, N - 1)), hub = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const top = [];
+    for (let j = 0; j < N; j++) {
+      if (list[j].c === list[i].c) continue;
+      const v = sim(i, j);
+      if (top.length < K) { top.push(v); top.sort((a, b) => a - b); } else if (v > top[0]) { top[0] = v; top.sort((a, b) => a - b); }
+    }
+    hub[i] = top.length ? top.reduce((a, b) => a + b, 0) / top.length : 0;
+  }
+  return { list, refs, scales, groups, nGroups: gid.size, mean, lowContrast, hub };
 }
 
 // ---------- 4. self-test on simulated camera shots ----------
@@ -157,17 +169,34 @@ async function simulateShot(png, R) {
 
 export const pct = (arr, p) => { if (!arr.length) return null; const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.max(0, Math.floor(p * (s.length - 1))))]; };
 
-export async function selfTest(index, images, rounds) {
-  const { list, refs, scales, groups, mean } = index;
-  const m = new Matcher(refs, scales, groups, mean);
-  const R = rng(12345);
-  const correctTop = [], margins = [], wrongTop = [], otherCard = [], fails = [];
-  let n = 0, ok = 0;
+export async function makeShots(list, images, rounds) {
+  const R = rng(12345), shots = [];
   for (let i = 0; i < list.length; i++) {
     const png = images.get(list[i].id);
     if (!png) continue;
-    for (let t = 0; t < rounds; t++) {
-      const { data, w, h } = await simulateShot(png, R);
+    for (let t = 0; t < rounds; t++) shots.push({ id: list[i].id, ...(await simulateShot(png, R)) });
+  }
+  return shots;
+}
+
+export async function selfTest(index, images, rounds, { lambda = 0, shots = null, quiet = false } = {}) {
+  const { list, refs, scales, groups, mean, hub } = index;
+  const m = new Matcher(refs, scales, groups, mean, { hub, lambda });
+  const R = rng(12345);
+  const pos = new Map(list.map((p, i) => [p.id, i]));
+  const correctTop = [], margins = [], wrongTop = [], otherCard = [], fails = [];
+  let n = 0, ok = 0;
+  const jobs = shots || [];
+  if (!shots) for (let i = 0; i < list.length; i++) {
+    const png = images.get(list[i].id);
+    if (!png) continue;
+    for (let t = 0; t < rounds; t++) jobs.push({ id: list[i].id, ...(await simulateShot(png, R)) });
+  }
+  for (const shot of jobs) {
+    const i = pos.get(shot.id);
+    if (i == null) continue;
+    {
+      const { data, w, h } = shot;
       const res = m.match(integral(data, w, h), { x: 0, y: 0, w, h }).results;
       n++;
       const top = res[0], second = res[1] || { s: 0 };
@@ -183,7 +212,7 @@ export async function selfTest(index, images, rounds) {
   }
   const acc = n ? ok / n : null;
   // Accept a match only above almost every wrong best-score, with a clear margin over the runner-up.
-  const accept = Math.max(0.42, Math.min(0.62, (pct(otherCard, 0.995) ?? 0.5) + 0.02));
+  const accept = Math.max(0.25, Math.min(0.75, (pct(otherCard, 0.995) ?? 0.5) + 0.02));
   const margin = Math.max(0.03, Math.min(0.06, (pct(margins, 0.1) ?? 0.05) / 3));
   const stats = {
     shots: n, accuracy: acc && +acc.toFixed(4),
@@ -192,10 +221,13 @@ export async function selfTest(index, images, rounds) {
     otherCard: { p50: pct(otherCard, 0.5), p99: pct(otherCard, 0.99), p995: pct(otherCard, 0.995), max: pct(otherCard, 1) },
     wouldAdd: { correct: correctTop.filter(s => s >= accept).length, wrongCard: 0 },
     margin: { p15: pct(margins, 0.15), p50: pct(margins, 0.5) },
-    thresholds: { accept: +accept.toFixed(3), margin: +margin.toFixed(3), release: +(accept * 0.8).toFixed(3) },
+    thresholds: { accept: +accept.toFixed(3), margin: +margin.toFixed(3), release: +(accept * 0.8).toFixed(3), lambda },
     fails: fails.slice(0, 40),
   };
-  log(`self-test: ${ok}/${n} correct (${(100 * acc).toFixed(1)}%), thresholds ${JSON.stringify(stats.thresholds)}`);
+  // what the scanner would actually do with these thresholds
+  stats.wouldAdd.correct = correctTop.filter((s, k) => s >= accept && margins[k] >= margin).length;
+  stats.recall = n ? +(stats.wouldAdd.correct / n).toFixed(4) : null;
+  if (!quiet) log(`self-test: ${ok}/${n} correct (${(100 * acc).toFixed(1)}%), would add ${(100 * stats.recall).toFixed(1)}%, thresholds ${JSON.stringify(stats.thresholds)}`);
   return stats;
 }
 
@@ -206,7 +238,36 @@ export async function writeIndex(dir, index, st, refId = p => p.id) {
   await fs.writeFile(path.join(dir, 'fp.json'), JSON.stringify({
     dim: DIM, gw: GW, gh: GH, n: index.list.length, groups: index.nGroups,
     ids: index.list.map(refId), scales: [...index.scales].map(x => +x.toFixed(4)), group: [...index.groups],
+    hub: [...index.hub].map(x => +x.toFixed(4)),
     mean: [...index.mean].map(x => +x.toFixed(6)),
     thresholds: st ? st.thresholds : { accept: 0.55, margin: 0.05, release: 0.44 },
   }));
+}
+
+/**
+ * Tries reference-blur and hub-penalty settings on the same simulated camera shots and prints a table.
+ * refs: index entries, images: id -> reference PNG. Returns the best setting by "would add" rate.
+ */
+export async function experiment(refs, images, rounds = 2, { blurs = [0, 1, 2], lambdas = [0, 0.25, 0.5, 0.75] } = {}) {
+  const shots = await makeShots(refs.filter(p => images.has(p.id)), images, rounds);
+  const rows = [];
+  for (const blur of blurs) {
+    const cache = {};
+    for (const p of refs) {
+      const png = images.get(p.id); if (!png) continue;
+      const { data, w, h } = await rawRGBA(blur > 0 ? await sharp(png).blur(blur).png().toBuffer() : png);
+      const { v, contrast } = fingerprint(integral(data, w, h), { x: 0, y: 0, w, h });
+      const { q, scale } = quantize(v);
+      cache[p.id] = { q: Buffer.from(q.buffer).toString('base64'), s: scale, c: contrast };
+    }
+    const index = buildIndex(refs, cache);
+    for (const lambda of lambdas) {
+      const st = await selfTest(index, images, rounds, { lambda, shots, quiet: true });
+      rows.push({ blur, lambda, accuracy: st.accuracy, wouldAdd: st.recall, correctP5: +(st.correctTop.p5 ?? 0).toFixed(3), otherP995: +(st.otherCard.p995 ?? 0).toFixed(3), accept: st.thresholds.accept });
+      log(`experiment blur=${blur} lambda=${lambda}: accuracy ${(100 * st.accuracy).toFixed(1)}%  would-add ${(100 * st.recall).toFixed(1)}%  correct-p5 ${rows.at(-1).correctP5}  other-p99.5 ${rows.at(-1).otherP995}  accept ${st.thresholds.accept}`);
+    }
+  }
+  rows.sort((a, b) => b.wouldAdd - a.wouldAdd || b.accuracy - a.accuracy);
+  log('experiment best: ' + JSON.stringify(rows[0]));
+  return rows;
 }

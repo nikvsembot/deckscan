@@ -71,7 +71,8 @@ export async function loadMatcher(game = 'cyberpunk') {
     if (!groupMembers.get(g).includes(id)) groupMembers.get(g).push(id);
   });
   db.matchers[game] = {
-    matcher: new Matcher(new Int8Array(bin), Float32Array.from(meta.scales), groups, meta.mean ? Float32Array.from(meta.mean) : null),
+    matcher: new Matcher(new Int8Array(bin), Float32Array.from(meta.scales), groups, meta.mean ? Float32Array.from(meta.mean) : null,
+      { hub: meta.hub ? Float32Array.from(meta.hub) : null, lambda: meta.thresholds?.lambda || 0 }),
     fpIds: meta.ids, thresholds: meta.thresholds, groupMembers,
   };
   return db.matchers[game];

@@ -12,7 +12,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DIM, GW, GH } from '../lib/fp.js';
-import { setFixture, getJSON, readJSON, log, buildFingerprints, buildIndex, selfTest, writeIndex } from './shared.mjs';
+import { setFixture, getJSON, readJSON, log, buildFingerprints, buildIndex, selfTest, writeIndex, experiment } from './shared.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA = path.join(ROOT, 'data');
@@ -21,6 +21,10 @@ const IMG_CACHE = path.join(CACHE_DIR, 'img');
 const FIXTURE = process.env.DECKSCAN_FIXTURE ? path.resolve(process.env.DECKSCAN_FIXTURE) : null;
 const ARGS = new Set(process.argv.slice(2));
 const SELFTEST_ROUNDS = ARGS.has('--no-selftest') ? 0 : Number(process.env.SELFTEST_ROUNDS || 2);
+// recognition tuning (see EXPERIMENT): blur references like a camera would; penalise "magnet" cards
+const REF_BLUR = Number(process.env.CP_REF_BLUR ?? 0);
+const HUB_LAMBDA = Number(process.env.CP_HUB_LAMBDA ?? 0);
+const EXPERIMENT = !!process.env.EXPERIMENT;
 
 const API = 'https://api.netdeck.gg/api/cards/cyberpunk';
 const CM_GAME = 23; // Cyberpunk on Cardmarket's price guide page
@@ -192,10 +196,11 @@ async function main() {
   try { cm = await loadCardmarket(cards, printings); }
   catch (e) { log('Cardmarket download failed, keeping previous prices:', e.message); }
 
-  const fp = await buildFingerprints(printings, imgUrl, SELFTEST_ROUNDS > 0, { cacheFile: path.join(CACHE_DIR, 'fp-cache.json'), imgDir: IMG_CACHE });
+  const fp = await buildFingerprints(printings, imgUrl, SELFTEST_ROUNDS > 0 || EXPERIMENT, { cacheFile: path.join(CACHE_DIR, 'fp-cache.json'), imgDir: IMG_CACHE, refBlur: REF_BLUR });
   const index = buildIndex(printings, fp.cache);
   const prevMeta = await readJSON(path.join(DATA, 'meta.json'), {});
-  const st = SELFTEST_ROUNDS > 0 ? await selfTest(index, fp.images, SELFTEST_ROUNDS) : prevMeta.selftest || null;
+  const st = SELFTEST_ROUNDS > 0 ? await selfTest(index, fp.images, SELFTEST_ROUNDS, { lambda: HUB_LAMBDA }) : prevMeta.selftest || null;
+  const exp = EXPERIMENT ? await experiment(printings.filter(p => fp.images.has(p.id)), fp.images, 2) : null;
 
   const setOrder = Object.keys(sets).sort((a, b) => {
     const ia = SET_PRIORITY.indexOf(a), ib = SET_PRIORITY.indexOf(b);
@@ -210,6 +215,7 @@ async function main() {
     builtAt: new Date().toISOString(), seconds: Math.round((Date.now() - t0) / 1000),
     cards: cards.length, printings: printings.length, fingerprints: index.list.length, artGroups: index.nGroups,
     imageFailures: fp.failed.slice(0, 20), lowContrastSkipped: index.lowContrast, cardmarket: cm ? cm.report : prevMeta.cardmarket || null, selftest: st,
+    tuning: { refBlur: REF_BLUR, hubLambda: HUB_LAMBDA }, experiment: exp,
   }, null, 1));
   log(`done in ${Math.round((Date.now() - t0) / 1000)}s`);
   if (cm && cm.report.checks.some(c => !c.ok)) log('WARNING: a Cardmarket version check failed; see data/meta.json');
